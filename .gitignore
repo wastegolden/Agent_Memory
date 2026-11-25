@@ -1,0 +1,12 @@
+node_modules/
+data/
+runtime/
+temp/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.log
+.env
+.env.*
+.DS_Store
+Thumbs.db
