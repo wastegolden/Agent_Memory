@@ -1,0 +1,16 @@
+{
+  "name": "agent-memory",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "test": "npm run test:j2 && npm run test:native",
+    "test:j2": "node node_modules/vitest/vitest.mjs run tests/j2-upstream",
+    "test:native": "node --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "vitest": "4.1.8",
+    "zod": "4.4.3"
+  }
+}

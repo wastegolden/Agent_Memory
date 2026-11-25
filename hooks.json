@@ -1,0 +1,7 @@
+{
+  "agent-memory": {
+    "SessionStart": [{ "type": "command", "command": "node ./src/antigravity/hook.mjs --event start" }],
+    "PreInvocation": [{ "type": "command", "command": "node ./src/antigravity/hook.mjs --event pre" }],
+    "Stop": [{ "type": "command", "command": "node ./src/antigravity/hook.mjs --event stop" }]
+  }
+}

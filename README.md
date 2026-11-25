@@ -1,35 +1,62 @@
-# Agent_Memory
+# Agent Memory
 
-面向 AI Coding / Assistant Harness（首发支持 **Antigravity CLI / App**）的独立记忆系统插件。
+Antigravity CLI / App 的本地记忆插件。开场注入一张短期清单，后续只注入变化。对话按 ID 读取细节；跨会话使用的事实与程序通过短标题和临时句柄检索。
 
-它既是模块化个人助手插件合集（记忆 / 入口 / 出口独立开发、最终合并）中的核心记忆层，也可以**单独挂载到任意 Agent 对话中用于任务与短期状态管理**——通过后台持续维护上下文之外的短期记忆正文，只在主对话上下文里保留一份固定上限的极简目录清单，避免上下文持续膨胀带来的推理变慢与输出掉速。
+## 安装和验证
 
----
+让启动 Antigravity 的环境能执行 Node.js 24 或更新版本。在插件根目录运行以下命令。
 
-## 核心主链
-
-```text
-入口 ──► 主对话 ◄──► 记忆区（短期记忆清单 / 短期记忆 + 整理会话） ──► 长期记忆库
-           ▲                                                           │
-           └─────────────── 记忆插件只读接口（按需检索） ◄───────────────┘
+```sh
+node --version
+agy plugin validate --strict --json .
+agy plugin install .
+agy plugin list --json
 ```
 
-- **入口 → 主对话**：所有对话与外部消息统一先进入主对话，由主对话统一承接与判断。
-- **主对话 ◄──► 记忆区**：
-  - 主对话上下文里只维护一张**固定上限的短期记忆清单（List）**（每条一行：`ID | 主题 | 状态`），正文全部留在上下文之外；
-  - 开场载入一次清单，后续仅在清单发生增删改时追加 1 行差量更新，避开宿主“注入内容永久留存轨迹”造成的上下文膨胀；
-  - 需要细节时，主对话看着清单直接按 ID 取短期正文，减少盲搜与漏召回。
-- **整理会话（双模式共用内核）**：
-  - 长期负责维护短期记忆与目录清单（合并、更新状态、划掉过期项，保持主上下文始终精简高速），并把成熟内容沉淀进长期记忆库；
-  - **模式 B（Subagent）**：插件自带整理子代理，直接使用宿主订阅额度；
-  - **模式 A（Daemon + API）**：独立后台进程 + 外部 API，不依赖 CLI 会话存活，便于常驻与接入入口插件。
-- **长期记忆库（预留 RAG / 向量化接口）**：
-  - 延续只读两步防泄露检索（`search` 返回短标题 + 句柄 → `read` 取正文与来源）；
-  - 在落盘建索引与检索处抽象极薄的 `Indexer / Retriever` 接口，当前沿用已有轻量检索，后续可直接接入向量化与混合检索（RAG）。
+在 CLI 的插件列表或 App 的 **Customizations → Installed** 中确认 `agent-memory` 已启用，打开新会话。开场应出现短期清单及 `list_rev`。调用 `memory_short_term_list` 可重拉清单；在空库用具体主题调用 `memory_search`，应返回 `NO_EVIDENCE`。在 App 中单独检查 MCP、Agents、Rules 和 Hooks 的加载状态。[官方插件安装与管理](https://antigravity.google/docs/marketplace/) · [插件校验](https://antigravity.google/docs/build-plugins/)
 
----
+插件可直接用 Node 启动。开发用的 `npm install` 仅用于 J2 基线测试。
 
-## 文档与当前阶段
+## 整理模式
 
-- 完整架构总结与代码复用方案见 [DESIGN.md](./DESIGN.md)。
-- 当前处于**架构定稿与建仓阶段**，待确认复用模块拆分后再分步迁移已有独立 J2 核心并实现插件外壳。
+**B · 子代理（默认）**　主对话调用 `memory-organizer`。子代理通过专用工具逐批领取证据并提交。容量不足时，同一消费者可在原租约内调整提案并立即重提。
+
+**A · 独立 daemon**　在启动宿主及 daemon 的环境中设置相同的 `MEMORY_MODE=daemon` 和数据目录。用本机进程环境提供模型设置，然后在插件目录启动：
+
+```sh
+node src/organizer/daemon.mjs
+```
+
+`node src/organizer/daemon.mjs --once` 处理最多一个批次。常驻进程可在主会话退出后继续整理。模型调用失败或提案被拒时，daemon 释放该批租约。首次延迟 30 秒，连续失败时延迟翻倍，上限一小时。其余就绪批次可继续处理。切换模式后重启宿主 MCP 进程。
+
+两种模式均按来源权限提交。优先级从高到低为 `owner`、`worker`、`external`，修改、合并、归档、晋升和容量淘汰只能作用于本级或更低级的记录。在 A 模式下，请让顶层会话先调用一次只读工具。宿主提供的当前会话等于根会话、无父会话且代理名为空时，插件登记 owner。B 模式还可由通过认证的整理子代理确认其父会话为根会话。登记前采集的用户输入保留 worker 权限。
+
+| 环境变量 | 含义 |
+|---|---|
+| `MEMORY_MODE` | `subagent`（默认）或 `daemon` |
+| `MEMORY_DATA_DIR` | 本机私有数据目录的绝对路径。默认是当前用户主目录下的 `.agent-memory`。Hook、MCP 和 daemon 须使用同一目录。 |
+| `MEMORY_CAPACITY` | 每个范围的短期清单上限，15～20，默认 18。 |
+| `MEMORY_SCOPE` | 可选的固定范围。默认按工作区集合生成范围；无工作区时按会话隔离。显式使用同一范围的会话共享该范围的记忆。 |
+| `MEMORY_CONTEXT` | 默认检索情境，例如 `staging`。可在单次搜索中指定 `context`。未指定任何情境时，可见全局事实和程序。 |
+| `MEMORY_API_STYLE` | A 模式的协议，`openai`（默认）或 `gemini`。 |
+| `MEMORY_API_BASE_URL` | A 模式的 API 根地址，含服务所需的版本前缀。OpenAI 兼容模式追加 `chat/completions`，Gemini 原生模式追加 `models/<model>:generateContent`。 |
+| `MEMORY_API_MODEL`、`MEMORY_API_KEY` | 模型名，以及服务需要时使用的凭据。通过本地环境提供。A 会把当前批次证据和同范围相关条目摘要发送给所配置的服务。 |
+
+## 工具
+
+| 调用方 | 工具 | 返回 |
+|---|---|---|
+| 主对话 | `memory_short_term_list`、`memory_short_term_read({id})` | 目录版本与四个索引字段，或指定 ID 的正文与来源。 |
+| 主对话 | `memory_search({text, scope?, context?})`、`memory_read({handle})` | 在会话绑定范围内搜索。例：`{"text":"DB_PORT","context":"staging"}`。按返回的句柄读取同一情境的有效版本。空结果含停止信号，过宽查询返回 `REFINE_QUERY`。 |
+| 整理子代理 | `memory_organizer_pull_batch`、`memory_organizer_commit` | 带租约的批次、现有版本和提案契约，以及事务回执。宿主提供的身份决定调用权限。 |
+
+## 开发验证
+
+```sh
+npm install
+npm run test:j2
+node --test tests/*.test.mjs
+agy plugin validate --strict --json .
+```
+
+Windows 可使用 `npm.cmd`。J2 基线含 21 个 Vitest 套件、226 个用例；新增测试使用原生 Node 测试运行器，临时 SQLite、独立写进程、真实 stdio/Hook 和本地 HTTP 模型夹具。[架构、目录与提交语义](./DESIGN.md)

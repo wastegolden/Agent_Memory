@@ -1,5 +1,6 @@
 node_modules/
 data/
+pending-stops/
 runtime/
 temp/
 *.sqlite

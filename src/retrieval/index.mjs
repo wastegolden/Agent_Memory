@@ -1,0 +1,158 @@
+import { randomUUID } from 'node:crypto'
+import { readLong } from '../storage/database.mjs'
+import { isPublicTitle, normalizeTerm, tokenize } from './terms.mjs'
+
+/**
+ * @typedef {NonNullable<ReturnType<typeof readLong>>} MemoryRecord
+ * @typedef {{upsert(record: MemoryRecord): void, remove(id: string, scope: string): void}} MemoryIndexer
+ * @typedef {{text: string, scope: string, context?: string, limit?: number, at?: string}} SearchQuery
+ * @typedef {{scope: string, id: string, version: number}} SearchHit
+ * @typedef {{search(query: SearchQuery): SearchHit[] | Promise<SearchHit[]>}} MemoryRetriever
+ */
+
+const maximumHits = 4
+const maximumHandles = 2000
+const genericTerms = new Set(['全部', '所有', '所有记录', '经验', '流程', 'all', 'everything'])
+
+/** Only initialization and the writer call this. A search never initializes a database. */
+export function installIndex(db) {
+  db.exec(`CREATE TABLE IF NOT EXISTS memory_search_terms (
+    scope TEXT NOT NULL, id TEXT NOT NULL, version INTEGER NOT NULL,
+    kind TEXT NOT NULL, context TEXT, valid_from TEXT, valid_until TEXT,
+    terms TEXT NOT NULL, PRIMARY KEY(scope, id)
+  ) WITHOUT ROWID`)
+}
+
+/** @implements {MemoryIndexer} The caller owns the SQLite transaction. */
+export class SQLiteMemoryIndexer {
+  constructor(db) {
+    this.db = db
+  }
+
+  upsert(record) {
+    const { scope, id, version, kind, data } = record
+    const fields = [publicTitle(record), ...(record.tags ?? [])]
+    if (kind === 'fact') fields.push(data.subject, data.key)
+    else fields.push(...data.parameters)
+    this.db.prepare(`INSERT INTO memory_search_terms
+      (scope,id,version,kind,context,valid_from,valid_until,terms)
+      VALUES (?,?,?,?,?,?,?,?)
+      ON CONFLICT(scope,id) DO UPDATE SET version=excluded.version,kind=excluded.kind,
+        context=excluded.context,valid_from=excluded.valid_from,
+        valid_until=excluded.valid_until,terms=excluded.terms`)
+      .run(scope, id, version, kind, record.context || null, record.validFrom || null,
+        record.validUntil || null, fields.map(normalizeTerm).join('\n'))
+  }
+
+  remove(id, scope) {
+    this.db.prepare('DELETE FROM memory_search_terms WHERE scope=? AND id=?').run(scope, id)
+  }
+}
+
+/** Rebuild derived terms when upgrading indexed fields or the public-title policy. */
+export function rebuildIndex(db) {
+  const indexer = new SQLiteMemoryIndexer(db)
+  db.exec('DELETE FROM memory_search_terms')
+  for (const { scope, id } of db.prepare('SELECT scope,id FROM long_records WHERE deleted=0').iterate()) {
+    indexer.upsert(readLong(db, scope, id))
+  }
+}
+
+/** @implements {MemoryRetriever} Titles and bodies come from the authoritative record. */
+export class SQLiteMemoryRetriever {
+  constructor(db) {
+    this.db = db
+  }
+
+  search({ text, scope, context = '', limit = maximumHits + 1, at = new Date().toISOString() }) {
+    const query = normalizeTerm(text)
+    const tokens = tokenize(query)
+    if (!scope || !tokens.length) return []
+    const matching = tokens.map(() => 'instr(terms, ?) > 0').join(' AND ')
+    return this.db.prepare(`SELECT scope,id,version FROM memory_search_terms
+      WHERE scope=? AND (kind <> 'fact' OR (
+        (context IS NULL OR context=?) AND (valid_from IS NULL OR julianday(valid_from)<=julianday(?))
+        AND (valid_until IS NULL OR julianday(valid_until)>julianday(?))))
+      AND (instr(terms,?)>0 OR (${matching}))
+      ORDER BY (instr(terms,?)>0) DESC, id LIMIT ?`)
+      .all(scope, context, at, at, query, ...tokens, query, limit)
+  }
+}
+
+function visible(record, scope, context, now) {
+  if (!record || record.deleted || record.scope !== scope) return false
+  if (record.kind !== 'fact') return record.kind === 'procedure'
+  return (!record.context || record.context === context)
+    && (!record.validFrom || Date.parse(record.validFrom) <= now)
+    && (!record.validUntil || now < Date.parse(record.validUntil))
+}
+
+function publicTitle(record) {
+  // Titles are explicitly published metadata. Never synthesize one from a value or the first line of a body.
+  if (isPublicTitle(record.title)) return record.title.trim()
+  return record.kind === 'fact' ? '情境事实' : '通用程序'
+}
+
+/** Own one instance per MCP server. Pass the authenticated session binding separately from tool arguments. */
+export class MemorySearch {
+  constructor(db, { retriever = new SQLiteMemoryRetriever(db),
+    readRecord = (scope, id) => readLong(db, scope, id), clock = Date.now } = {}) {
+    this.retriever = retriever
+    this.readRecord = readRecord
+    this.clock = clock
+    this.handles = new Map()
+  }
+
+  search({ text, scope, context }, identity) {
+    if (!identity?.sessionId || !identity.scope || (scope !== undefined && scope !== identity.scope))
+      return { status: 'FORBIDDEN' }
+    if (typeof text !== 'string' || text.length > 256 || (context !== undefined && typeof context !== 'string'))
+      return { status: 'INVALID_ARGUMENT' }
+    const query = normalizeTerm(text)
+    if (!/[\p{L}\p{N}]/u.test(query) || genericTerms.has(query)) return { status: 'REFINE_QUERY' }
+    const effectiveContext = context?.trim() ?? (identity.context || '')
+    const hits = this.retriever.search({ text: query, scope: identity.scope, context: effectiveContext,
+      at: new Date(this.clock()).toISOString(), limit: maximumHits + 1 })
+    return Array.isArray(hits) ? this.#issue(hits, identity, effectiveContext)
+      : hits.then(rows => this.#issue(rows, identity, effectiveContext))
+  }
+
+  #issue(hits, identity, context) {
+    const now = this.clock()
+    const records = new Map()
+    for (const hit of hits) {
+      if (hit.scope !== identity.scope) continue
+      const record = this.readRecord(identity.scope, hit.id)
+      if (visible(record, identity.scope, context, now) && record.id === hit.id && record.version === hit.version)
+        records.set(hit.id, record)
+    }
+    if (records.size > maximumHits) return { status: 'REFINE_QUERY' }
+    if (!records.size) return { status: 'NO_EVIDENCE', stop: true,
+      overview: '当前可见范围内没有匹配的有效证据。', next: '停止重复检索，等待新的来源证据。' }
+    const results = []
+    for (const record of records.values()) {
+      const handle = randomUUID()
+      if (this.handles.size >= maximumHandles) this.handles.delete(this.handles.keys().next().value)
+      this.handles.set(handle, { sessionId: identity.sessionId, scope: identity.scope,
+        defaultContext: identity.context || '', context, id: record.id, version: record.version })
+      results.push({ title: publicTitle(record), handle })
+    }
+    return { status: 'OK', results }
+  }
+
+  read({ handle }, identity) {
+    const bound = this.handles.get(handle)
+    if (!bound || !identity || bound.sessionId !== identity.sessionId || bound.scope !== identity.scope
+      || bound.defaultContext !== (identity.context || '')) return { status: 'INVALID_HANDLE' }
+    const record = this.readRecord(bound.scope, bound.id)
+    if (!visible(record, bound.scope, bound.context, this.clock()) || record.id !== bound.id || record.version !== bound.version) {
+      this.handles.delete(handle)
+      return { status: 'INVALID_HANDLE' }
+    }
+    this.handles.delete(handle)
+    this.handles.set(handle, bound)
+    const { kind, data, context, validFrom, validUntil, version } = record
+    return { status: 'OK', record: { kind, title: publicTitle(record), data, context, validFrom, validUntil, version },
+      sources: record.sources.map(source => ({ kind: 'event', id: source.id })) }
+  }
+}
