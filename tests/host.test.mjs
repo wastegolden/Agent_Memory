@@ -7,7 +7,7 @@ import test from 'node:test'
 import { runScript, sandbox, stdioClient } from './helpers/host-process.mjs'
 import { enqueue, pendingScopes } from '../src/organizer/queue.mjs'
 
-const mainTools = ['memory_short_term_list', 'memory_short_term_read', 'memory_search', 'memory_read']
+const mainTools = ['short_term_list', 'short_term_read', 'search', 'read']
 
 function meta(id, root = id, organizer = false) {
   return {
@@ -43,7 +43,7 @@ test('plugin declares only reader tools eager; explicit hook events override pay
   const server = stdioClient(t, [], env)
   await server.initialize()
   const child = meta(randomUUID(), base.conversationId, true)
-  assert.equal((await server.call('memory_organizer_pull_batch', {}, child)).batch.events[0].text, 'Minimal Stop captured')
+  assert.equal((await server.call('organizer_pull_batch', {}, child)).batch.events[0].text, 'Minimal Stop captured')
   for (const [input, options] of [['{', env], [JSON.stringify(base), {...env, MEMORY_CAPACITY:'bad'}]]) {
     const out = await runScript('src/antigravity/hook.mjs', ['--event','pre'], options, input)
     assert.equal(out.code, 0)
@@ -78,28 +78,28 @@ test('a no-workspace provisional child safely adopts its parent scope without re
     pendingScopes(db) // Persist one cursor before binding, leaving its payload unread.
     appendFileSync(trace, userLine(1, 'Pending marker'))
     await hook(env, childHook, 'stop')
-    const {batch} = await server.call('memory_organizer_pull_batch', {}, organizer)
+    const {batch} = await server.call('organizer_pull_batch', {}, organizer)
     assert.deepEqual(batch.events.map(event => [event.sourceSessionId,event.text]), [[root,'Parent evidence']])
     assert.equal(bound(child).role, 'organizer')
     assert.equal(batch.scope, bound(child).scope)
     assert.equal(batch.scope, bound(root).scope)
-    const receipt = await server.call('memory_organizer_commit',
+    const receipt = await server.call('organizer_commit',
       {batchId:batch.batchId,proposalId:randomUUID(),operations:[]}, organizer)
     assert.equal(receipt.status,'COMMITTED')
     await hook(env, childHook, 'stop')
-    assert.equal((await server.call('memory_organizer_pull_batch', {}, organizer)).batch, null)
+    assert.equal((await server.call('organizer_pull_batch', {}, organizer)).batch, null)
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM memory_queue WHERE sourceSessionId=?').get(child).n, 0)
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM transcript_cursor WHERE sourceSessionId=?').get(child).n, 0)
 
     await hook(env, {conversationId:otherRoot}, 'start')
     const mismatch = {...meta(randomUUID(), otherRoot, true), 'antigravity.google/parent_conversation_id':root}
-    assert.equal((await server.call('memory_organizer_pull_batch', {}, mismatch)).status, 'FORBIDDEN')
-    assert.equal((await server.call('memory_organizer_pull_batch', {}, meta(child,otherRoot,true))).status, 'FORBIDDEN')
-    assert.equal((await server.call('memory_organizer_pull_batch', {}, meta(root,otherRoot,true))).status, 'FORBIDDEN')
+    assert.equal((await server.call('organizer_pull_batch', {}, mismatch)).status, 'FORBIDDEN')
+    assert.equal((await server.call('organizer_pull_batch', {}, meta(child,otherRoot,true))).status, 'FORBIDDEN')
+    assert.equal((await server.call('organizer_pull_batch', {}, meta(root,otherRoot,true))).status, 'FORBIDDEN')
     const used = randomUUID()
     await hook(env, {conversationId:used}, 'start')
     enqueue(db, {sourceSessionId:used,scope:bound(used).scope,sourceId:'existing',text:'Existing event',authorRole:'worker'})
-    assert.equal((await server.call('memory_organizer_pull_batch', {}, meta(used,otherRoot,true))).status, 'FORBIDDEN')
+    assert.equal((await server.call('organizer_pull_batch', {}, meta(used,otherRoot,true))).status, 'FORBIDDEN')
     assert.equal(bound(otherRoot).role,'reader')
     assert.equal(bound(used).role,'reader')
   } finally { db.close() }
@@ -115,14 +115,14 @@ test('a competing writer cannot block a public read and a named agent cannot obt
   try {
     db.exec('BEGIN IMMEDIATE')
     const before = performance.now()
-    assert.deepEqual((await server.call('memory_short_term_list', {}, meta(id))).items, [])
+    assert.deepEqual((await server.call('short_term_list', {}, meta(id))).items, [])
     assert.ok(performance.now() - before < 2500)
     db.exec('ROLLBACK')
     const role = () => db.prepare('SELECT role FROM session_roles WHERE conversationId=?').get(id).role
     assert.equal(role(), 'reader')
-    assert.deepEqual((await server.call('memory_short_term_list', {}, {...meta(id),'antigravity.google/agent_name':'research'})).items, [])
+    assert.deepEqual((await server.call('short_term_list', {}, {...meta(id),'antigravity.google/agent_name':'research'})).items, [])
     assert.equal(role(), 'reader')
-    await server.call('memory_short_term_list', {}, meta(id))
+    await server.call('short_term_list', {}, meta(id))
     assert.equal(role(), 'owner')
   } finally { db.close() }
 })
@@ -143,11 +143,11 @@ test('the public MCP rejects organizer calls while the daemon owns the queue', a
   const server = stdioClient(t, [], settings)
   await server.initialize()
   const organizer = meta(randomUUID(), root, true)
-  assert.equal((await server.call('memory_organizer_pull_batch', {}, organizer)).status, 'FORBIDDEN')
-  assert.equal((await server.call('memory_organizer_commit', {
+  assert.equal((await server.call('organizer_pull_batch', {}, organizer)).status, 'FORBIDDEN')
+  assert.equal((await server.call('organizer_commit', {
     batchId: randomUUID(), proposalId: randomUUID(), operations: [],
   }, organizer)).status, 'FORBIDDEN')
-  assert.deepEqual((await server.call('memory_short_term_list', {}, meta(root))).items, [])
+  assert.deepEqual((await server.call('short_term_list', {}, meta(root))).items, [])
 })
 
 test('PreInvocation recovers a locked SessionStart and injects the initial list exactly once', async t => {
@@ -177,7 +177,7 @@ test('a final Stop under a write lock preserves its exact byte range and origina
   }
   const initial = stdioClient(t, [], settings)
   await initial.initialize()
-  await initial.call('memory_short_term_list', {}, meta(owner))
+  await initial.call('short_term_list', {}, meta(owner))
   const locker = new DatabaseSync(join(dir, 'memory.sqlite'))
   try {
     locker.exec('BEGIN IMMEDIATE')
@@ -192,19 +192,19 @@ test('a final Stop under a write lock preserves its exact byte range and origina
   const recovered = stdioClient(t, [], settings)
   await recovered.initialize()
   // Proof obtained after Stop must not elevate already captured provisional evidence.
-  await recovered.call('memory_short_term_list', {}, meta(provisional))
+  await recovered.call('short_term_list', {}, meta(provisional))
   const worker = meta(randomUUID(), owner, true)
   const evidence = []
   for (let i = 0; i < clients.length; i++) {
-    const { batch } = await recovered.call('memory_organizer_pull_batch', {}, worker)
+    const { batch } = await recovered.call('organizer_pull_batch', {}, worker)
     assert.ok(batch)
     evidence.push(...batch.events)
-    assert.equal((await recovered.call('memory_organizer_commit', { batchId: batch.batchId,
+    assert.equal((await recovered.call('organizer_commit', { batchId: batch.batchId,
       proposalId: randomUUID(), operations: [] }, worker)).status, 'COMMITTED')
   }
   assert.deepEqual(evidence.map(event => [event.sourceSessionId, event.authorRole, event.text]).sort(),
     [[owner, 'owner', 'Captured ' + owner], [provisional, 'worker', 'Captured ' + provisional]].sort())
-  assert.equal((await recovered.call('memory_organizer_pull_batch', {}, worker)).batch, null)
+  assert.equal((await recovered.call('organizer_pull_batch', {}, worker)).batch, null)
 })
 
 test('Antigravity hooks, organizer and two main sessions share a scoped memory database over stdio', async t => {
@@ -225,15 +225,15 @@ test('Antigravity hooks, organizer and two main sessions share a scoped memory d
   await server.initialize()
   const principal = meta(root), worker = meta(child, root, true)
   const names = (await server.request('tools/list', { _meta: principal })).result.tools.map(tool => tool.name)
-  for (const tool of mainTools) assert.ok(names.includes(tool))
-  const empty = await server.call('memory_search', { text: 'release port' }, principal)
+  assert.deepEqual(names.sort(), [...mainTools, 'organizer_pull_batch', 'organizer_commit'].sort())
+  const empty = await server.call('search', { text: 'release port' }, principal)
   assert.equal(empty.status, 'NO_EVIDENCE')
   assert.equal(empty.stop, true)
   assert.ok(empty.overview && empty.next)
   const forged = { batchId: 'missing', proposalId: randomUUID(), operations: [], role: 'organizer', _meta: worker }
-  assert.equal((await server.call('memory_organizer_commit', forged, principal)).status, 'FORBIDDEN')
-  assert.equal((await server.call('memory_organizer_pull_batch', {}, meta(root, root, true))).status, 'FORBIDDEN')
-  assert.equal((await server.call('memory_organizer_pull_batch', {}, meta(child, root))).status, 'FORBIDDEN')
+  assert.equal((await server.call('organizer_commit', forged, principal)).status, 'FORBIDDEN')
+  assert.equal((await server.call('organizer_pull_batch', {}, meta(root, root, true))).status, 'FORBIDDEN')
+  assert.equal((await server.call('organizer_pull_batch', {}, meta(child, root))).status, 'FORBIDDEN')
 
   const evidence = '发布前检查监听端口'
   appendFileSync(trace, userLine(1, evidence))
@@ -241,7 +241,7 @@ test('Antigravity hooks, organizer and two main sessions share a scoped memory d
     content: 'synthetic system instruction must never enter the organizer queue' }) + '\n')
   assert.deepEqual(await hook(settings, stop), {})
   assert.deepEqual(await hook(settings, stop), {})
-  const { batch } = await server.call('memory_organizer_pull_batch', {}, worker)
+  const { batch } = await server.call('organizer_pull_batch', {}, worker)
   assert.ok(batch?.batchId)
   assert.equal(batch.context, 'staging')
   assert.equal(batch.events.length, 1)
@@ -254,9 +254,9 @@ test('Antigravity hooks, organizer and two main sessions share a scoped memory d
     { type: 'long.put', id: 'port', expectedVersion: 0, kind: 'fact', title: 'Staging port',
       data: { subject: 'service', key: 'service_port', value: 43210 }, context: 'staging', sourceIds },
   ] }
-  assert.equal((await server.call('memory_organizer_commit', proposal, principal)).status, 'FORBIDDEN')
-  assert.equal((await server.call('memory_organizer_commit', proposal, worker)).status, 'COMMITTED')
-  assert.equal((await server.call('memory_organizer_pull_batch', {}, worker)).batch, null)
+  assert.equal((await server.call('organizer_commit', proposal, principal)).status, 'FORBIDDEN')
+  assert.equal((await server.call('organizer_commit', proposal, worker)).status, 'COMMITTED')
+  assert.equal((await server.call('organizer_pull_batch', {}, worker)).batch, null)
 
   const concurrent = await Promise.all([2, 3].map(invocationNum => hook(settings, { ...base, invocationNum })))
   assert.equal(concurrent.filter(output => output.injectSteps).length, 1)
@@ -265,38 +265,38 @@ test('Antigravity hooks, organizer and two main sessions share a scoped memory d
   assert.ok(digest.includes('+'))
   assert.ok(!digest.includes(evidence))
   assert.deepEqual(await hook(settings, { ...base, invocationNum: 3 }), {})
-  const list = await server.call('memory_short_term_list', {}, principal)
+  const list = await server.call('short_term_list', {}, principal)
   assert.ok(list.list_rev > 0)
   assert.equal(list.items.length, 1)
   assert.deepEqual(Object.keys(list.items[0]).sort(), ['id', 'status', 'title', 'updatedAt'])
-  assert.equal((await server.call('memory_short_term_read', { id: 'check' }, principal)).body, evidence)
-  const found = await server.call('memory_search', { text: 'service_port' }, principal)
+  assert.equal((await server.call('short_term_read', { id: 'check' }, principal)).body, evidence)
+  const found = await server.call('search', { text: 'service_port' }, principal)
   assert.equal(found.status, 'OK')
   assert.equal(found.results.length, 1)
   assert.deepEqual(Object.keys(found.results[0]).sort(), ['handle', 'title'])
   assert.ok(!JSON.stringify(found).includes('43210'))
   const { handle } = found.results[0]
-  const read = await server.call('memory_read', { handle }, principal)
+  const read = await server.call('read', { handle }, principal)
   assert.equal(read.record.data.value, 43210)
   assert.deepEqual(read.sources.map(Object.keys), [['kind', 'id']])
-  assert.equal((await server.call('memory_search', {text:'service_port',context:'production'}, principal)).status,'NO_EVIDENCE')
+  assert.equal((await server.call('search', {text:'service_port',context:'production'}, principal)).status,'NO_EVIDENCE')
   const alternate = stdioClient(t, [], {...settings,MEMORY_CONTEXT:'production'})
   await alternate.initialize()
-  assert.equal((await alternate.call('memory_search',{text:'service_port'},principal)).status,'NO_EVIDENCE')
-  const override = await alternate.call('memory_search',{text:'service_port',context:'staging'},principal)
+  assert.equal((await alternate.call('search',{text:'service_port'},principal)).status,'NO_EVIDENCE')
+  const override = await alternate.call('search',{text:'service_port',context:'staging'},principal)
   assert.equal(override.status,'OK')
-  assert.equal((await alternate.call('memory_read',{handle:override.results[0].handle},principal)).record.context,'staging')
-  const invalid = (await server.request('tools/call', {name:'memory_search',arguments:{text:'service_port',context:null},_meta:principal})).result
+  assert.equal((await alternate.call('read',{handle:override.results[0].handle},principal)).record.context,'staging')
+  const invalid = (await server.request('tools/call', {name:'search',arguments:{text:'service_port',context:null},_meta:principal})).result
   assert.equal(invalid.structuredContent.status,'INVALID_ARGUMENT')
   assert.equal(invalid.isError,true)
 
   // Same workspace and stdio transport, different registered conversation.
   assert.match(injected(await hook(settings, { ...base, conversationId: other })), /发布检查/)
-  assert.equal((await server.call('memory_read', { handle }, meta(other))).status, 'INVALID_HANDLE')
-  assert.equal((await alternate.call('memory_read', {handle:override.results[0].handle}, meta(other))).status, 'INVALID_HANDLE')
+  assert.equal((await server.call('read', { handle }, meta(other))).status, 'INVALID_HANDLE')
+  assert.equal((await alternate.call('read', {handle:override.results[0].handle}, meta(other))).status, 'INVALID_HANDLE')
   const unrelated = randomUUID()
   await hook({ ...settings, MEMORY_SCOPE: 'unrelated' }, { ...base, conversationId: unrelated })
-  const denied = await server.call('memory_search', { text: 'service_port', scope: 'release' }, meta(unrelated))
+  const denied = await server.call('search', { text: 'service_port', scope: 'release' }, meta(unrelated))
   assert.ok(['FORBIDDEN', 'NO_EVIDENCE'].includes(denied.status))
   assert.ok(!JSON.stringify(denied).includes('Staging port'))
 
@@ -304,16 +304,16 @@ test('Antigravity hooks, organizer and two main sessions share a scoped memory d
   const own = { ...base, conversationId: child }
   assert.deepEqual(await hook(settings, { ...own, invocationNum: 1 }), {})
   assert.deepEqual(await hook(settings, { ...stop, conversationId: child }), {})
-  assert.equal((await server.call('memory_organizer_pull_batch', {}, worker)).batch, null)
+  assert.equal((await server.call('organizer_pull_batch', {}, worker)).batch, null)
   appendFileSync(trace, userLine(3, '发布复核'))
   assert.deepEqual(await hook(settings, { ...stop, executionNum: 2 }), {})
-  const next = (await server.call('memory_organizer_pull_batch', {}, worker)).batch
+  const next = (await server.call('organizer_pull_batch', {}, worker)).batch
   assert.equal(next.events.length, 1)
   assert.ok(next.events[0].text.includes('发布复核'))
   assert.notEqual(next.events[0].id, sourceIds[0])
   const existing = next.current.short.find(row => row.id === 'check')
   assert.equal(existing.version, 1)
-  assert.equal((await server.call('memory_organizer_commit', {
+  assert.equal((await server.call('organizer_commit', {
     batchId: next.batchId, proposalId: randomUUID(), operations: [
       { type: 'short.put', id: existing.id, expectedVersion: existing.version, title: '发布复核',
         body: '单据已复核', status: 'done', sourceIds: [next.events[0].id] },
@@ -322,9 +322,9 @@ test('Antigravity hooks, organizer and two main sessions share a scoped memory d
   assert.ok(injected(await hook(settings, { ...base, invocationNum: 4 })).includes('~'))
   appendFileSync(trace, userLine(4, '划掉已完成的检查'))
   await hook(settings, { ...stop, executionNum: 3 })
-  const last = (await server.call('memory_organizer_pull_batch', {}, worker)).batch
+  const last = (await server.call('organizer_pull_batch', {}, worker)).batch
   const done = last.current.short.find(row => row.id === 'check')
-  assert.equal((await server.call('memory_organizer_commit', {
+  assert.equal((await server.call('organizer_commit', {
     batchId: last.batchId, proposalId: randomUUID(), operations: [
       { type: 'short.archive', id: done.id, expectedVersion: done.version, sourceIds: [last.events[0].id] },
     ],
@@ -339,12 +339,12 @@ test('Antigravity hooks, organizer and two main sessions share a scoped memory d
   writeFileSync(nestedTrace, userLine(1, '移除 service_port'))
   const nested = { ...base, conversationId: delegated, transcriptPath: nestedTrace }
   await hook(settings, nested)
-  await server.call('memory_short_term_list', {}, meta(delegated, root))
+  await server.call('short_term_list', {}, meta(delegated, root))
   await hook(settings, { ...nested, terminationReason: 'model_stop', fullyIdle: true })
-  const lower = (await server.call('memory_organizer_pull_batch', {}, worker)).batch
+  const lower = (await server.call('organizer_pull_batch', {}, worker)).batch
   assert.equal(lower.events[0].authorRole, 'worker')
-  const refused = await server.call('memory_organizer_commit', { batchId: lower.batchId, proposalId: randomUUID(),
+  const refused = await server.call('organizer_commit', { batchId: lower.batchId, proposalId: randomUUID(),
     operations: [{ type: 'long.remove', id: 'port', expectedVersion: 1, sourceIds: [lower.events[0].id] }] }, worker)
   assert.equal(refused.status, 'FORBIDDEN')
-  assert.equal((await server.call('memory_read', { handle }, principal)).record.data.value, 43210)
+  assert.equal((await server.call('read', { handle }, principal)).record.data.value, 43210)
 })

@@ -32,7 +32,7 @@ test('installed production entries start without core, package.json, npm or thir
   assert.match(start.injectSteps[0].systemMessage.systemMessage, /list_rev=0/)
   const requests = [
     { id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25' } },
-    { id: 2, method: 'tools/call', params: { name: 'memory_search', arguments: { text: 'unique-term' },
+    { id: 2, method: 'tools/call', params: { name: 'search', arguments: { text: 'unique-term' },
       _meta: { 'antigravity.google/conversation_id': id } } },
   ]
   const [, reply] = run('antigravity/mcp.mjs', requests.map(x => JSON.stringify({ jsonrpc: '2.0', ...x })).join('\n'))

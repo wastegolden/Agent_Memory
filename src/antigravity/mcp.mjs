@@ -11,15 +11,15 @@ const string = { type: 'string', minLength: 1 }
 const schema = (properties = {}, required = Object.keys(properties)) =>
   ({ type: 'object', properties, required, additionalProperties: false })
 const tools = [
-  { name: 'memory_short_term_list', description: 'List the current scoped short-term directory.', inputSchema: schema() },
-  { name: 'memory_short_term_read', description: 'Read a scoped short-term item by ID.', inputSchema: schema({ id: string }) },
-  { name: 'memory_search', description: 'Search for short titles and session-bound handles. Stop on NO_EVIDENCE.',
+  { name: 'short_term_list', description: 'List the current scoped short-term directory.', inputSchema: schema() },
+  { name: 'short_term_read', description: 'Read a scoped short-term item by ID.', inputSchema: schema({ id: string }) },
+  { name: 'search', description: 'Search for short titles and session-bound handles. On REFINE_QUERY, search one specific term at a time. Stop on NO_EVIDENCE.',
     inputSchema: schema({ text: { type: 'string', maxLength: 256 }, scope: string, context: { type: 'string' } }, ['text']) },
-  { name: 'memory_read', description: 'Read authorized evidence for a handle returned by memory_search.',
+  { name: 'read', description: 'Read authorized evidence for a handle returned by search.',
     inputSchema: schema({ handle: string }) },
-  { name: 'memory_organizer_pull_batch', description: 'Organizer only. Claim evidence and receive the current proposal contract.',
+  { name: 'organizer_pull_batch', description: 'Organizer only. Claim evidence and receive the current proposal contract.',
     inputSchema: schema() },
-  { name: 'memory_organizer_commit', description: 'Organizer only. Commit a proposal for the batch under its lease. Follow the operation contract returned by pull_batch.',
+  { name: 'organizer_commit', description: 'Organizer only. Commit a proposal for the batch under its lease. Follow the operation contract returned by organizer_pull_batch.',
     inputSchema: schema({ batchId: string, proposalId: string, operations: { type: 'array', items: { type: 'object' } } }) },
 ]
 
@@ -31,12 +31,12 @@ const forbidden = { status: 'FORBIDDEN' }
 function call(tool, args, meta) {
   const id = meta?.['antigravity.google/conversation_id']
   if (typeof id !== 'string' || !id) return forbidden
-  const organizes = tool.name.startsWith('memory_organizer_')
+  const organizes = tool.name.startsWith('organizer_')
   const agentName = meta['antigravity.google/agent_name']
   if (organizes ? (config.mode !== 'subagent' || agentName !== 'memory-organizer') : agentName === 'memory-organizer')
     return forbidden
   const shape = tool.inputSchema
-  const invalid = { status: tool.name === 'memory_search' ? 'INVALID_ARGUMENT' : 'INVALID_INPUT' }
+  const invalid = { status: tool.name === 'search' ? 'INVALID_ARGUMENT' : 'INVALID_INPUT' }
   if (!args || typeof args !== 'object' || Array.isArray(args) ||
       Object.keys(args).some(key => !Object.hasOwn(shape.properties, key)) ||
       shape.required.some(key => !Object.hasOwn(args, key))) return invalid
@@ -52,7 +52,7 @@ function call(tool, args, meta) {
     writer ??= openDatabase(config.databaseFile)
     const child = organizerSession(writer, meta)
     if (!child) return forbidden
-    if (tool.name === 'memory_organizer_pull_batch') {
+    if (tool.name === 'organizer_pull_batch') {
       return { batch: pullForOrganizer(writer, { scope: child.scope, consumerId: id, context: config.context }) }
     }
     commits ??= new CommitService(writer, { capacity: config.capacity })
@@ -75,17 +75,17 @@ function call(tool, args, meta) {
   }
   const identity = { sessionId: id, scope: bound.scope, context: config.context }
   switch (tool.name) {
-    case 'memory_short_term_list': return listShort(reader, bound.scope)
-    case 'memory_short_term_read': {
+    case 'short_term_list': return listShort(reader, bound.scope)
+    case 'short_term_read': {
       const item = readShort(reader, bound.scope, args.id)
       if (!item) return { status: 'NOT_FOUND' }
       return { id: item.id, title: item.title, status: item.status, updatedAt: item.updatedAt, body: item.body,
         sources: item.sources.map(source => ({ kind: 'event', id: source.id })) }
     }
-    case 'memory_search':
+    case 'search':
       search ??= new MemorySearch(reader)
       return search.search(args, identity)
-    case 'memory_read':
+    case 'read':
       search ??= new MemorySearch(reader)
       return search.read(args, identity)
   }

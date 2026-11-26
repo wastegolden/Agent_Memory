@@ -45,7 +45,7 @@ function handleHook(db, config, input, event) {
   let summary = diff.join(' / ')
   if (summary.length > 220) {
     summary = ['+', '~', '-'].map(mark => mark + diff.filter(entry => entry.startsWith(mark)).length).join(' / ')
-      + ' (memory_short_term_list)'
+      + ' (short_term_list)'
   }
   return inject('Memory list_rev=' + list_rev + ' ' + summary)
 }

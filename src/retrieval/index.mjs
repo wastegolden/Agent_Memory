@@ -68,14 +68,21 @@ export class SQLiteMemoryRetriever {
     const query = normalizeTerm(text)
     const tokens = tokenize(query)
     if (!scope || !tokens.length) return []
-    const matching = tokens.map(() => 'instr(terms, ?) > 0').join(' AND ')
-    return this.db.prepare(`SELECT scope,id,version FROM memory_search_terms
-      WHERE scope=? AND (kind <> 'fact' OR (
-        (context IS NULL OR context=?) AND (valid_from IS NULL OR julianday(valid_from)<=julianday(?))
-        AND (valid_until IS NULL OR julianday(valid_until)>julianday(?))))
-      AND (instr(terms,?)>0 OR (${matching}))
+    const matches = tokens.map(() => '(instr(terms,?)>0)')
+    // Apply current-record visibility before LIMIT so stale candidates cannot hide a fifth hit.
+    const candidates = `SELECT scope,id,version FROM memory_search_terms
+      JOIN long_records r USING(scope,id,version)
+      WHERE scope=? AND r.deleted=0 AND (r.kind='procedure' OR (r.kind='fact'
+        AND (r.context='' OR r.context=?) AND (r.valid_from IS NULL OR julianday(r.valid_from)<=julianday(?))
+        AND (r.valid_until IS NULL OR julianday(r.valid_until)>julianday(?))))`
+    const visibility = [scope, context, at, at]
+    const strict = this.db.prepare(`${candidates} AND (instr(terms,?)>0 OR (${matches.join(' AND ')}))
       ORDER BY (instr(terms,?)>0) DESC, id LIMIT ?`)
-      .all(scope, context, at, at, query, ...tokens, query, limit)
+      .all(...visibility, query, ...tokens, query, limit)
+    if (strict.length || tokens.length === 1) return strict
+    return this.db.prepare(`${candidates} AND (${matches.join(' OR ')})
+      ORDER BY ${matches.join(' + ')} DESC, (instr(terms,?)>0) DESC, id LIMIT ?`)
+      .all(...visibility, ...tokens, ...tokens, query, limit)
   }
 }
 

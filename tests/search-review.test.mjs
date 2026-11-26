@@ -56,6 +56,75 @@ test('rebuilding old derived terms restores technical labels and preserves safe 
   assert.equal(search.read({ handle: hit.handle }, reader).record.title, '通用程序')
 })
 
+test('native titles survive validation, indexing, partial Chinese search and session-bound reads', t => {
+  const { put, search } = setup(t)
+  const titles = ['接收端口｜入站信号不稳，需要巡检', '签收凭单·归档', '计量表组｜复核']
+  for (const [index, title] of titles.entries()) {
+    const op = { ...route, id: String(index), title }
+    assert.equal(isPublicTitle(title), true)
+    assert.equal(parseProposal({ scope: reader.scope, batchId: 'b', proposalId: 'p', operations: [op] })
+      .operations[0].title, title)
+    put(reader.scope, [op])
+    const { results } = search.search({ text: title }, reader)
+    assert.deepEqual(results.map(hit => hit.title), [title])
+    assert.equal(search.read({ handle: results[0].handle }, reader).record.title, title)
+  }
+  const { results } = search.search({ text: '签收凭单 计量表组' }, reader)
+  // The tokenizer may also match 收 in the port title.
+  assert.deepEqual(results.slice(0, 2).map(hit => hit.title).sort(), titles.slice(1).sort())
+  for (const { title, handle } of results) {
+    assert.equal(search.read({ handle }, { ...reader, sessionId: 'other' }).status, 'INVALID_HANDLE')
+    assert.equal(search.read({ handle }, reader).record.title, title)
+  }
+})
+
+test('strict hits take precedence and partial hits rank by distinct matched terms then ID', t => {
+  const { put, search } = setup(t)
+  const text = 'alpha beta gamma'
+  const query = () => search.search({ text }, reader)
+  const putTitle = (id, title) => put(reader.scope, [{ ...route, id, title }])
+  assert.equal(query().status, 'NO_EVIDENCE')
+  assert.equal(query().stop, true)
+  putTitle('0', 'unrelated')
+  const miss = query()
+  assert.equal(miss.status, 'NO_EVIDENCE')
+  assert.equal(miss.stop, true)
+  putTitle('a', 'gamma gamma gamma')
+  putTitle('c', 'alpha beta')
+  putTitle('b', 'beta gamma')
+  putTitle('d', 'alpha')
+  assert.deepEqual(query().results.map(hit => hit.title), ['beta gamma', 'alpha beta', 'gamma gamma gamma', 'alpha'])
+  putTitle('e', 'beta')
+  assert.equal(query().status, 'REFINE_QUERY')
+  putTitle('f', 'gamma beta alpha')
+  putTitle('z', text)
+  assert.deepEqual(query().results.map(hit => hit.title), [text, 'gamma beta alpha'])
+})
+
+test('partial search counts only current visible records before applying the four-hit threshold', t => {
+  const { db, put, search } = setup(t)
+  const fact = { type: 'long.put', expectedVersion: 0, kind: 'fact', title: 'Signal',
+    data: { key: 'signal', subject: 'sensor', value: 1 } }
+  put('other', [{ ...route, id: 'foreign', title: 'Signal missing' }])
+  put(reader.scope, [
+    { ...fact, id: 'a', title: 'Signal missing', context: 'preview' },
+    { ...fact, id: 'b', validUntil: '2000-01-01' },
+    { ...fact, id: 'c', data: { ...fact.data, subject: 'upcoming' }, validFrom: '2099-01-01' },
+    { ...route, id: 'd', title: 'Signal missing' }, { ...route, id: 'e', title: 'Signal' },
+  ])
+  db.prepare('UPDATE long_records SET deleted=1 WHERE id=?').run('d')
+  db.prepare('UPDATE memory_search_terms SET version=0 WHERE id=?').run('e')
+  const query = () => search.search({ text: 'signal missing' }, reader)
+  const miss = query()
+  assert.equal(miss.status, 'NO_EVIDENCE')
+  assert.equal(miss.stop, true)
+  const titles = ['Signal one', 'Signal two', 'Signal three', 'Signal four']
+  put(reader.scope, titles.map((title, i) => ({ ...route, id: 'live-' + i, title })))
+  assert.deepEqual(query().results.map(hit => hit.title), titles)
+  put(reader.scope, [{ ...route, id: 'last', title: 'Signal five' }])
+  assert.equal(query().status, 'REFINE_QUERY')
+})
+
 test('explicit search context selects scoped facts and the handle retains that effective context', t => {
   const { db, put, search } = setup(t)
   const fact = { type: 'long.put', id: 'live', kind: 'fact', title: '运行端口', expectedVersion: 0,

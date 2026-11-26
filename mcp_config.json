@@ -4,10 +4,10 @@
       "command": "node",
       "args": ["${PLUGIN_ROOT}/src/antigravity/mcp.mjs"],
       "tools": {
-        "memory_short_term_list": { "eager": true },
-        "memory_short_term_read": { "eager": true },
-        "memory_search": { "eager": true },
-        "memory_read": { "eager": true }
+        "short_term_list": { "eager": true },
+        "short_term_read": { "eager": true },
+        "search": { "eager": true },
+        "read": { "eager": true }
       }
     }
   }

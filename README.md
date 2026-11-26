@@ -13,7 +13,7 @@ agy plugin install .
 agy plugin list --json
 ```
 
-在 CLI 的插件列表或 App 的 **Customizations → Installed** 中确认 `agent-memory` 已启用，打开新会话。开场应出现短期清单及 `list_rev`。调用 `memory_short_term_list` 可重拉清单；在空库用具体主题调用 `memory_search`，应返回 `NO_EVIDENCE`。在 App 中单独检查 MCP、Agents、Rules 和 Hooks 的加载状态。[官方插件安装与管理](https://antigravity.google/docs/marketplace/) · [插件校验](https://antigravity.google/docs/build-plugins/)
+在 CLI 的插件列表或 App 的 **Customizations → Installed** 中确认 `agent-memory` 已启用，打开新会话。开场应出现短期清单及 `list_rev`。调用 `short_term_list` 可重拉清单；在空库用具体主题调用 `search`，应返回 `NO_EVIDENCE`。在 App 中单独检查 MCP、Agents、Rules 和 Hooks 的加载状态。[官方插件安装与管理](https://antigravity.google/docs/marketplace/) · [插件校验](https://antigravity.google/docs/build-plugins/)
 
 插件可直接用 Node 启动。开发用的 `npm install` 仅用于 J2 基线测试。
 
@@ -46,9 +46,9 @@ node src/organizer/daemon.mjs
 
 | 调用方 | 工具 | 返回 |
 |---|---|---|
-| 主对话 | `memory_short_term_list`、`memory_short_term_read({id})` | 目录版本与四个索引字段，或指定 ID 的正文与来源。 |
-| 主对话 | `memory_search({text, scope?, context?})`、`memory_read({handle})` | 在会话绑定范围内搜索。例：`{"text":"DB_PORT","context":"staging"}`。按返回的句柄读取同一情境的有效版本。空结果含停止信号，过宽查询返回 `REFINE_QUERY`。 |
-| 整理子代理 | `memory_organizer_pull_batch`、`memory_organizer_commit` | 带租约的批次、现有版本和提案契约，以及事务回执。宿主提供的身份决定调用权限。 |
+| 主对话 | `short_term_list`、`short_term_read({id})` | 目录版本与四个索引字段，或指定 ID 的正文与来源。 |
+| 主对话 | `search({text, scope?, context?})`、`read({handle})` | 在会话绑定范围内搜索。例：`{"text":"DB_PORT","context":"staging"}`。按返回的句柄读取同一情境的有效版本。多词查询优先匹配全部词，未命中时按匹配词数排序。超过四条时返回 `REFINE_QUERY`，可按单个主题重查。零命中时返回停止信号。 |
+| 整理子代理 | `organizer_pull_batch`、`organizer_commit` | 带租约的批次、现有版本和提案契约，以及事务回执。宿主提供的身份决定调用权限。 |
 
 ## 开发验证
 

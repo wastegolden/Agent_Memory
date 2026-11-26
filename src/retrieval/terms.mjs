@@ -11,6 +11,6 @@ export function tokenize(text) {
 // Allow only the listed characters, even when an older record skipped validation.
 export function isPublicTitle(title) {
   return typeof title === 'string' && title.trim().length > 0 && [...title].length <= 60
-    && !/[^\p{L}\p{N}\p{M} _.,，。:：()（）+、·/&@#\[\]-]/u.test(title)
+    && !/[^\p{L}\p{N}\p{M} _.,，。:：()（）+、·｜/&@#\[\]-]/u.test(title)
     && !/:\/\/|(?:^|\s)(?:\/\/\S|mailto:\S|www\.\S)/u.test(normalizeTerm(title))
 }
