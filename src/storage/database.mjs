@@ -8,6 +8,17 @@ export const factKey = value => value.normalize('NFKC').trim().toLowerCase()
 const factIndex = `CREATE UNIQUE INDEX fact_identity ON long_records(scope,context,fact_subject,fact_key)
   WHERE kind='fact' AND deleted=0`
 
+const outcomeSchema = `
+  CREATE TABLE procedure_outcomes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, procedure_id TEXT NOT NULL,
+    procedure_version INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('ok','failed','fallback')),
+    failed_step INTEGER, outward_done INTEGER NOT NULL DEFAULT 0, detail TEXT NOT NULL DEFAULT '',
+    author_role TEXT NOT NULL CHECK(author_role IN ('owner','worker','external')),
+    session_id TEXT NOT NULL, recorded_at TEXT NOT NULL
+  );
+  CREATE INDEX procedure_outcomes_recent ON procedure_outcomes(scope, procedure_id, id DESC);
+`
+
 const schema = `
   CREATE TABLE IF NOT EXISTS session_roles (
     conversationId TEXT PRIMARY KEY,
@@ -92,27 +103,31 @@ export function openDatabase(file, { readOnly = false, busyTimeout = 3000 } = {}
     db.exec(`PRAGMA busy_timeout = ${busyTimeout}`)
     const schemaVersion = db.prepare('PRAGMA user_version')
     const version = schemaVersion.get().user_version
-    if (version === 2) return db
-    if (version === 1 && readOnly) throw new Error('Open the memory database for writing once to upgrade it')
-    if ((version !== 0 && version !== 1) || readOnly) throw new Error('Unsupported or uninitialized memory database')
+    if (version === 3) return db
+    if ((version === 1 || version === 2) && readOnly) throw new Error('Open the memory database for writing once to upgrade it')
+    if (![0,1,2].includes(version) || readOnly) throw new Error('Unsupported or uninitialized memory database')
     db.exec('PRAGMA journal_mode = WAL; BEGIN IMMEDIATE')
     switch (schemaVersion.get().user_version) {
       case 0:
         db.exec(schema)
         initQueue(db)
         installIndex(db)
+        db.exec(factIndex)
         break
       case 1:
         migrateV1(db)
+        db.exec(factIndex)
         break
       case 2:
+        break
+      case 3:
         db.exec('COMMIT')
         return db
       default:
         throw new Error('Unsupported memory database version')
     }
-    db.exec(factIndex)
-    db.exec('PRAGMA user_version = 2; COMMIT')
+    db.exec(outcomeSchema)
+    db.exec('PRAGMA user_version = 3; COMMIT')
     return db
   } catch (error) {
     db.close()
@@ -152,4 +167,20 @@ export function readLong(db, scope, id) {
 export function historyLong(db, scope, id) {
   return db.prepare('SELECT record FROM long_history WHERE scope=? AND id=? ORDER BY version')
     .all(scope,id).map(row => JSON.parse(row.record))
+}
+
+// The caller holds BEGIN IMMEDIATE from handle resolution through this insert.
+export function recordProcedureOutcome(db, {scope, procedureId, procedureVersion, status, failedStep = null,
+  outwardDone = false, detail = '', authorRole, sessionId}) {
+  db.prepare(`INSERT INTO procedure_outcomes
+    (scope,procedure_id,procedure_version,status,failed_step,outward_done,detail,author_role,session_id,recorded_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`).run(scope, procedureId, procedureVersion, status, failedStep,
+      Number(outwardDone), detail, authorRole, sessionId, new Date().toISOString())
+}
+
+export function listProcedureOutcomes(db, scope, id, limit = 3) {
+  return db.prepare(`SELECT procedure_version AS procedureVersion, status, failed_step AS failedStep,
+    outward_done AS outwardDone, detail, author_role AS authorRole, recorded_at AS recordedAt
+    FROM procedure_outcomes WHERE scope=? AND procedure_id=? ORDER BY id DESC LIMIT ?`)
+    .all(scope, id, limit).map(row => ({...row, outwardDone: Boolean(row.outwardDone)}))
 }

@@ -26,7 +26,8 @@ function dateOrNull(value) {
 
 const longFields = ['kind', 'title', 'data', 'context', 'validFrom', 'validUntil', 'tags']
 function longRecord(raw) {
-  const {id, expectedVersion, kind, title, data} = raw
+  const {id, expectedVersion, kind, title} = raw
+  let {data} = raw
   check(nonempty(id) && versionOk(expectedVersion) && isPublicTitle(title) && object(data))
   check(raw.context === undefined || typeof raw.context === 'string')
   check(raw.tags === undefined || strings(raw.tags))
@@ -36,16 +37,21 @@ function longRecord(raw) {
     // Persist exactly the JSON value the caller submitted (including zero, false and null).
     try { check(isDeepStrictEqual(data.value, JSON.parse(JSON.stringify(data.value)))) }
     catch { throw new CommitError('INVALID_PROPOSAL') }
+    data = {...data, subject: data.subject.trim(), key: data.key.trim()}
   } else {
-    check(kind === 'procedure' && keys(data, ['conditions','steps','parameters']))
+    check(kind === 'procedure' && keys(data, ['conditions','steps','parameters','outwardSteps']))
     check(!raw.context && raw.validFrom == null && raw.validUntil == null)
     check(strings(data.conditions) && strings(data.steps) && data.steps.length > 0 && strings(data.parameters))
+    if (Object.hasOwn(data, 'outwardSteps')) {
+      check(Array.isArray(data.outwardSteps) && data.outwardSteps.every(step =>
+        Number.isInteger(step) && step >= 1 && step <= data.steps.length))
+      data = {...data, outwardSteps: [...new Set(data.outwardSteps)].sort((a, b) => a - b)}
+    }
   }
   const validFrom = dateOrNull(raw.validFrom)
   const validUntil = dateOrNull(raw.validUntil)
   check(!validFrom || !validUntil || validFrom < validUntil)
-  return {id, expectedVersion, kind, title: title.trim(),
-    data: kind === 'fact' ? {...data, subject: data.subject.trim(), key: data.key.trim()} : data,
+  return {id, expectedVersion, kind, title: title.trim(), data,
     context: raw.context?.trim() ?? '',
     validFrom, validUntil, tags: raw.tags ?? []}
 }

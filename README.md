@@ -40,7 +40,7 @@ node src/organizer/daemon.mjs
 | `MEMORY_CONTEXT` | 默认检索情境，例如 `staging`。可在单次搜索中指定 `context`。未指定任何情境时，可见全局事实和程序。 |
 | `MEMORY_API_STYLE` | A 模式的协议，`openai`（默认）或 `gemini`。 |
 | `MEMORY_API_BASE_URL` | A 模式的 API 根地址，含服务所需的版本前缀。OpenAI 兼容模式追加 `chat/completions`，Gemini 原生模式追加 `models/<model>:generateContent`。 |
-| `MEMORY_API_MODEL`、`MEMORY_API_KEY` | 模型名，以及服务需要时使用的凭据。通过本地环境提供。A 会把当前批次证据和同范围相关条目摘要发送给所配置的服务。 |
+| `MEMORY_API_MODEL`、`MEMORY_API_KEY` | 模型名，以及服务需要时使用的凭据。通过本地环境提供。A 会向该服务发送批次证据、相关事实的摘要、相关程序的完整步骤及最近三条回执。 |
 
 ## 工具
 
@@ -48,7 +48,10 @@ node src/organizer/daemon.mjs
 |---|---|---|
 | 主对话 | `short_term_list`、`short_term_read({id})` | 目录版本与四个索引字段，或指定 ID 的正文与来源。 |
 | 主对话 | `search({text, scope?, context?})`、`read({handle})` | 在会话绑定范围内搜索。例：`{"text":"DB_PORT","context":"staging"}`。按返回的句柄读取同一情境的有效版本。多词查询优先匹配全部词，未命中时按匹配词数排序。超过四条时返回 `REFINE_QUERY`，可按单个主题重查。零命中时返回停止信号。 |
+| 主对话、工作子代理 | `report_outcome({handle, status, failedStep?, outwardDone?, detail?})` | 用执行时的程序句柄报告 `ok`、`failed` 或 `fallback`。步骤从 1 起算，详情最多 240 字。回执不触发清单更新。 |
 | 整理子代理 | `organizer_pull_batch`、`organizer_commit` | 带租约的批次、现有版本和提案契约，以及事务回执。宿主提供的身份决定调用权限。 |
+
+程序的 `read` 响应附带最近一次回执 `lastOutcome`、当前版本累计失败次数 `recentFailures`。仅当最近回执属于当前版本、执行失败且尚未触达外部副作用步骤时，`fallbackVersion` 才可指向有成功回执的旧版本。触达副作用步骤后，应先核实外部状态。
 
 ## 开发验证
 

@@ -152,7 +152,8 @@ test('v1 migration keeps the strongest current fact, appends linked history, and
   assert.throws(() => openDatabase(file,{readOnly:true}),/upgrade/u)
   const db = openDatabase(file)
   try {
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version,2)
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,3)
+    assert.equal(db.prepare('SELECT count(*) AS n FROM procedure_outcomes').get().n,0)
     for (const id of ['worker','owner-old']) {
       const historical = historyLong(db,scope,id)
       assert.deepEqual(historical.map(r => [r.data.value,r.deleted,r.supersededBy]),[

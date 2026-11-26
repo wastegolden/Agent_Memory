@@ -17,6 +17,10 @@ const tools = [
     inputSchema: schema({ text: { type: 'string', maxLength: 256 }, scope: string, context: { type: 'string' } }, ['text']) },
   { name: 'read', description: 'Read authorized evidence for a handle returned by search.',
     inputSchema: schema({ handle: string }) },
+  { name: 'report_outcome', description: 'Report a procedure run using its search handle. Mark outwardDone if a step with external effects was reached.',
+    inputSchema: schema({ handle: string, status: { type: 'string', enum: ['ok','failed','fallback'] },
+      failedStep: { type: 'integer', minimum: 1 }, outwardDone: { type: 'boolean' },
+      detail: { type: 'string', maxLength: 240 } }, ['handle','status']) },
   { name: 'organizer_pull_batch', description: 'Organizer only. Claim evidence and receive the current proposal contract.',
     inputSchema: schema() },
   { name: 'organizer_commit', description: 'Organizer only. Commit a proposal for the batch under its lease. Follow the operation contract returned by organizer_pull_batch.',
@@ -27,6 +31,23 @@ const config = settings()
 let reader, search, writer, attestor, commits
 let initialized = false
 const forbidden = { status: 'FORBIDDEN' }
+
+function publicIdentity(db, id, meta) {
+  const bound = session(db, id)
+  if (!bound || bound.role === 'organizer') return null
+  if (bound.role === 'reader' && !meta['antigravity.google/agent_name'] &&
+      meta['antigravity.google/root_conversation_id'] === id && !meta['antigravity.google/parent_conversation_id']) {
+    try {
+      const writable = db === writer ? writer : (attestor ??= openDatabase(config.databaseFile, { busyTimeout: 0 }))
+      if (writable.prepare("UPDATE session_roles SET role='owner' WHERE conversationId=? AND role='reader'").run(id).changes)
+        bound.role = 'owner'
+    } catch (error) {
+      // Reads can proceed while another writer holds the lock.
+      if ((error.errcode & 255) !== 5) throw error
+    }
+  }
+  return { sessionId: id, scope: bound.scope, context: config.context, authorRole: bound.role === 'owner' ? 'owner' : 'worker' }
+}
 
 function call(tool, args, meta) {
   const id = meta?.['antigravity.google/conversation_id']
@@ -43,8 +64,11 @@ function call(tool, args, meta) {
   for (const [key, value] of Object.entries(args)) {
     const field = shape.properties[key]
     if (field.type === 'string' && (typeof value !== 'string' || (field.minLength && !value.trim()) ||
-        (field.maxLength && value.length > field.maxLength))) return invalid
+        (field.maxLength && [...value].length > field.maxLength))) return invalid
     if (field.type === 'array' && !Array.isArray(value)) return invalid
+    if (field.enum && !field.enum.includes(value)) return invalid
+    if (field.type === 'integer' && (!Number.isInteger(value) || value < field.minimum)) return invalid
+    if (field.type === 'boolean' && typeof value !== 'boolean') return invalid
   }
   // SessionStart owns initialization. Reads never create a store or write selections.
   if (!existsSync(config.databaseFile)) return forbidden
@@ -59,34 +83,33 @@ function call(tool, args, meta) {
     return commits.commit({ ...args, scope: child.scope }, id)
   }
   reader ??= openDatabase(config.databaseFile, { readOnly: true })
-  const bound = session(reader, id)
-  if (!bound || bound.role === 'organizer') return forbidden
-  // The Hook alone cannot distinguish a delegated prompt from a top-level user.
-  // Attest that distinction once using host metadata, without modifying memory records.
-  if (bound.role === 'reader' && !agentName && meta['antigravity.google/root_conversation_id'] === id &&
-      !meta['antigravity.google/parent_conversation_id']) {
+  search ??= new MemorySearch(reader)
+  if (tool.name === 'report_outcome') {
+    writer ??= openDatabase(config.databaseFile)
+    writer.exec('BEGIN IMMEDIATE')
     try {
-      attestor ??= openDatabase(config.databaseFile, { busyTimeout: 0 })
-      attestor.prepare("UPDATE session_roles SET role='owner' WHERE conversationId=? AND role='reader'").run(id)
-    } catch (error) {
-      // Reads may proceed immediately. Future host calls can attest the role.
-      if ((error.errcode & 255) !== 5) throw error
+      const identity = publicIdentity(writer, id, meta)
+      if (!identity) return forbidden
+      const result = search.reportOutcome(writer, args, identity)
+      writer.exec('COMMIT')
+      return result
+    } finally {
+      if (writer.isTransaction) writer.exec('ROLLBACK')
     }
   }
-  const identity = { sessionId: id, scope: bound.scope, context: config.context }
+  const identity = publicIdentity(reader, id, meta)
+  if (!identity) return forbidden
   switch (tool.name) {
-    case 'short_term_list': return listShort(reader, bound.scope)
+    case 'short_term_list': return listShort(reader, identity.scope)
     case 'short_term_read': {
-      const item = readShort(reader, bound.scope, args.id)
+      const item = readShort(reader, identity.scope, args.id)
       if (!item) return { status: 'NOT_FOUND' }
       return { id: item.id, title: item.title, status: item.status, updatedAt: item.updatedAt, body: item.body,
         sources: item.sources.map(source => ({ kind: 'event', id: source.id })) }
     }
     case 'search':
-      search ??= new MemorySearch(reader)
       return search.search(args, identity)
     case 'read':
-      search ??= new MemorySearch(reader)
       return search.read(args, identity)
   }
 }

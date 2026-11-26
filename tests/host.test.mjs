@@ -225,7 +225,7 @@ test('Antigravity hooks, organizer and two main sessions share a scoped memory d
   await server.initialize()
   const principal = meta(root), worker = meta(child, root, true)
   const names = (await server.request('tools/list', { _meta: principal })).result.tools.map(tool => tool.name)
-  assert.deepEqual(names.sort(), [...mainTools, 'organizer_pull_batch', 'organizer_commit'].sort())
+  assert.deepEqual(names.sort(), [...mainTools, 'report_outcome', 'organizer_pull_batch', 'organizer_commit'].sort())
   const empty = await server.call('search', { text: 'release port' }, principal)
   assert.equal(empty.status, 'NO_EVIDENCE')
   assert.equal(empty.stop, true)

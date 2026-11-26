@@ -5,7 +5,7 @@ import { pullForOrganizer } from '../src/organizer/contract.mjs'
 import { enqueue, pullBatch } from '../src/organizer/queue.mjs'
 import { settings } from '../src/organizer/settings.mjs'
 import { CommitService } from '../src/storage/commit.mjs'
-import { openDatabase } from '../src/storage/database.mjs'
+import { openDatabase, recordProcedureOutcome } from '../src/storage/database.mjs'
 
 function fixture(t) {
   const db = openDatabase(':memory:')
@@ -38,7 +38,8 @@ test('organizer matches indexed metadata across natural evidence and returns cur
   apply([
     fact('by-subject', '路由器', 'latency', {context: 'staging', validFrom: '2001-01-01', validUntil: '2099-01-01'}),
     fact('by-key', 'backend', 'Tcp_Window', {context: 'production'}),
-    procedure('by-param', {data: {conditions: [], steps: ['private step'], parameters: ['SocketMode']}}),
+    procedure('by-param', {tags: ['socket'], data: {conditions: ['connected'],
+      steps: ['inspect', 'send', 'verify'], parameters: ['SocketMode'], outwardSteps: [2]}}),
     procedure('by-tag', {tags: ['ＰｒｏｂｅＴａｇ']}),
     procedure('by-title', {title: '驱动检测流程'}),
     fact('past', 'old', 'key', {tags: ['probetag'], validUntil: '2001-01-01'}),
@@ -50,6 +51,13 @@ test('organizer matches indexed metadata across natural evidence and returns cur
   ])
   apply([procedure('foreign', {tags: ['probetag']})], 'other-scope')
   apply([{type: 'long.remove', id: 'deleted', expectedVersion: 1}])
+  db.exec('BEGIN IMMEDIATE')
+  for (const [i, status] of ['ok','failed','fallback','ok'].entries()) {
+    recordProcedureOutcome(db, {scope: request.scope, procedureId: 'by-param', procedureVersion: 1,
+      status, detail: String(i), failedStep: status === 'failed' ? 2 : null,
+      outwardDone: status === 'failed', sessionId: 'session', authorRole: 'worker'})
+  }
+  db.exec('COMMIT')
   emit('请检查路由器，确认 ＴＣＰ＿ＷＩＮＤＯＷ 和 sOcKeTmOdE。')
   emit('安排驱动检测，再验证 probetag。')
   const batch = pullForOrganizer(db, {...request, context: 'production'})
@@ -61,10 +69,16 @@ test('organizer matches indexed metadata across natural evidence and returns cur
   assert.deepEqual([...byId.keys()].sort(), ['by-key', 'by-param', 'by-subject', 'by-tag', 'by-title'])
   assert.deepEqual(byId.get('by-subject'), {id: 'by-subject', version: 1, kind: 'fact', title: '配置',
     context: 'staging', validFrom: '2001-01-01T00:00:00.000Z', validUntil: '2099-01-01T00:00:00.000Z',
-    authorRole: 'worker', subject: '路由器', key: 'latency', parameters: []})
-  assert.deepEqual(byId.get('by-param'), {id: 'by-param', version: 1, kind: 'procedure', title: '指引',
+    authorRole: 'worker', subject: '路由器', key: 'latency', tags: []})
+  const {recentOutcomes, ...record} = byId.get('by-param')
+  assert.deepEqual(record, {id: 'by-param', version: 1, kind: 'procedure', title: '指引',
     context: '', validFrom: null, validUntil: null, authorRole: 'worker',
-    subject: null, key: null, parameters: ['SocketMode']})
+    tags: ['socket'], conditions: ['connected'], steps: ['inspect', 'send', 'verify'],
+    outwardSteps: [2], parameters: ['SocketMode']})
+  assert.deepEqual(recentOutcomes.map(r => [r.status, r.detail, r.failedStep, r.outwardDone]),
+    [['ok','3',null,false], ['fallback','2',null,false], ['failed','1',2,true]])
+  assert.deepEqual(byId.get('by-tag').recentOutcomes, [])
+  assert.equal(Object.hasOwn(byId.get('by-tag'), 'outwardSteps'), false)
 })
 
 test('organizer ranks distinct evidence terms before limiting long suggestions to 32', t => {

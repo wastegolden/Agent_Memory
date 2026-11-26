@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { readLong } from '../storage/database.mjs'
+import { listProcedureOutcomes, readLong, recordProcedureOutcome } from '../storage/database.mjs'
 import { isPublicTitle, normalizeTerm, tokenize } from './terms.mjs'
 
 /**
@@ -104,6 +104,7 @@ function publicTitle(record) {
 export class MemorySearch {
   constructor(db, { retriever = new SQLiteMemoryRetriever(db),
     readRecord = (scope, id) => readLong(db, scope, id), clock = Date.now } = {}) {
+    this.db = db
     this.retriever = retriever
     this.readRecord = readRecord
     this.clock = clock
@@ -147,19 +148,51 @@ export class MemorySearch {
     return { status: 'OK', results }
   }
 
-  read({ handle }, identity) {
+  #resolve(handle, identity, readRecord = this.readRecord) {
     const bound = this.handles.get(handle)
     if (!bound || !identity || bound.sessionId !== identity.sessionId || bound.scope !== identity.scope
-      || bound.defaultContext !== (identity.context || '')) return { status: 'INVALID_HANDLE' }
-    const record = this.readRecord(bound.scope, bound.id)
+      || bound.defaultContext !== (identity.context || '')) return null
+    const record = readRecord(bound.scope, bound.id)
     if (!visible(record, bound.scope, bound.context, this.clock()) || record.id !== bound.id || record.version !== bound.version) {
       this.handles.delete(handle)
-      return { status: 'INVALID_HANDLE' }
+      return null
     }
     this.handles.delete(handle)
     this.handles.set(handle, bound)
+    return record
+  }
+
+  read({ handle }, identity) {
+    const record = this.#resolve(handle, identity)
+    if (!record) return { status: 'INVALID_HANDLE' }
     const { kind, data, context, validFrom, validUntil, version } = record
-    return { status: 'OK', record: { kind, title: publicTitle(record), data, context, validFrom, validUntil, version },
+    const result = { status: 'OK', record: { kind, title: publicTitle(record), data, context, validFrom, validUntil, version },
       sources: record.sources.map(source => ({ kind: 'event', id: source.id })) }
+    if (kind === 'procedure') {
+      const {scope, id} = record
+      const last = this.db && listProcedureOutcomes(this.db, scope, id, 1)[0]
+      result.lastOutcome = last ?? null
+      result.recentFailures = last ? this.db.prepare(`SELECT count(*) AS n FROM procedure_outcomes
+        WHERE scope=? AND procedure_id=? AND procedure_version=? AND status='failed'`).get(scope, id, version).n : 0
+      result.fallbackVersion = null
+      if (last?.procedureVersion === version && last.status === 'failed' && !last.outwardDone) {
+        result.fallbackVersion = this.db.prepare(`SELECT max(h.version) AS version FROM long_history h
+          JOIN procedure_outcomes o ON o.scope=h.scope AND o.procedure_id=h.id AND o.procedure_version=h.version
+          WHERE h.scope=? AND h.id=? AND h.version<? AND o.status='ok'`).get(scope, id, version).version
+      }
+    }
+    return result
+  }
+
+  reportOutcome(writer, {handle, status, failedStep, outwardDone = false, detail}, identity) {
+    const record = this.#resolve(handle, identity, (scope, id) => readLong(writer, scope, id))
+    if (record?.kind !== 'procedure') return { status: 'INVALID_HANDLE' }
+    if (failedStep !== undefined) {
+      if (status === 'ok' || failedStep > record.data.steps.length) return { status: 'INVALID_INPUT' }
+      outwardDone ||= record.data.outwardSteps?.some(step => failedStep >= step) ?? false
+    }
+    recordProcedureOutcome(writer, {scope: record.scope, procedureId: record.id, procedureVersion: record.version,
+      status, failedStep, outwardDone, detail, authorRole: identity.authorRole, sessionId: identity.sessionId})
+    return { status: 'OK' }
   }
 }

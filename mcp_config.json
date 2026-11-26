@@ -7,7 +7,8 @@
         "short_term_list": { "eager": true },
         "short_term_read": { "eager": true },
         "search": { "eager": true },
-        "read": { "eager": true }
+        "read": { "eager": true },
+        "report_outcome": { "eager": false }
       }
     }
   }
