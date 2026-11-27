@@ -94,6 +94,33 @@ test('organizer ranks distinct evidence terms before limiting long suggestions t
   assert.equal(batch.current.long[0].id, 'z-target')
 })
 
+test('failedRevisions returns the latest failure of the two most recently failing older live snapshots', t => {
+  const {db, request, emit, apply} = fixture(t)
+  const id = 'deploy'
+  for (let version = 1; version <= 6; version++) {
+    const data = {conditions:[], parameters:[], steps:['step v' + version]}
+    if (version >= 3) data.outwardSteps = [1]
+    apply([version === 5 ? {type:'long.remove', id, expectedVersion:4} :
+      procedure(id, {expectedVersion:version-1, data})])
+  }
+  for (const [version, status, detail, outwardDone] of [
+    [4,'failed','older failure',false], [3,'failed','first try',true], [1,'failed','legacy',null],
+    [3,'fallback','external step',true], [3,'ok','later success',false], [5,'failed','deleted',false],
+    [6,'failed','current',null],
+  ]) {
+    recordProcedureOutcome(db, {scope:request.scope, procedureId:id, procedureVersion:version, status, detail,
+      failedStep:version === 3 ? 1 : null, outwardDone, authorRole:'worker', sessionId:'session'})
+  }
+  emit(id)
+  const [recalled] = pullForOrganizer(db, request).current.long
+  assert.deepEqual(recalled.failedRevisions, [
+    {version:3, steps:['step v3'], outwardSteps:[1],
+      lastFailure:{status:'fallback', failedStep:1, outwardDone:true, detail:'external step'}},
+    {version:1, steps:['step v1'], outwardSteps:[],
+      lastFailure:{status:'failed', failedStep:null, outwardDone:null, detail:'legacy'}},
+  ])
+})
+
 test('settings trim scope and context and treat blank overrides as absent', () => {
   const configured = settings({MEMORY_SCOPE: ' release  ', MEMORY_CONTEXT: '  staging\t'})
   assert.equal(configured.scope, 'release')

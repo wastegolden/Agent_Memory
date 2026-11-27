@@ -16,7 +16,7 @@ const tools = [
   { name: 'search', description: 'Search for short titles and session-bound handles. On REFINE_QUERY, search one specific term at a time. Stop on NO_EVIDENCE.',
     inputSchema: schema({ text: { type: 'string', maxLength: 256 }, scope: string, context: { type: 'string' } }, ['text']) },
   { name: 'read', description: 'Read authorized evidence for a handle returned by search.',
-    inputSchema: schema({ handle: string }) },
+    inputSchema: schema({ handle: string, version: { type: 'integer', minimum: 1 } }, ['handle']) },
   { name: 'report_outcome', description: 'Report a procedure run using its search handle. Mark outwardDone if a step with external effects was reached.',
     inputSchema: schema({ handle: string, status: { type: 'string', enum: ['ok','failed','fallback'] },
       failedStep: { type: 'integer', minimum: 1 }, outwardDone: { type: 'boolean' },

@@ -162,34 +162,49 @@ export class MemorySearch {
     return record
   }
 
-  read({ handle }, identity) {
-    const record = this.#resolve(handle, identity)
+  read({ handle, version: requestedVersion }, identity) {
+    let record = this.#resolve(handle, identity)
     if (!record) return { status: 'INVALID_HANDLE' }
+    if (requestedVersion !== undefined) {
+      if (!Number.isInteger(requestedVersion) || requestedVersion < 1) return { status: 'INVALID_INPUT' }
+      if (record.kind !== 'procedure') return { status: 'INVALID_HANDLE' }
+      const row = this.db?.prepare('SELECT record FROM long_history WHERE scope=? AND id=? AND version=?')
+        .get(record.scope, record.id, requestedVersion)
+      if (!row) return { status: 'NOT_FOUND' }
+      record = JSON.parse(row.record)
+      if (record.deleted) return { status: 'NOT_FOUND' }
+    }
     const { kind, data, context, validFrom, validUntil, version } = record
     const result = { status: 'OK', record: { kind, title: publicTitle(record), data, context, validFrom, validUntil, version },
       sources: record.sources.map(source => ({ kind: 'event', id: source.id })) }
-    if (kind === 'procedure') {
+    if (kind === 'procedure' && requestedVersion === undefined) {
       const {scope, id} = record
       const last = this.db && listProcedureOutcomes(this.db, scope, id, 1)[0]
       result.lastOutcome = last ?? null
       result.recentFailures = last ? this.db.prepare(`SELECT count(*) AS n FROM procedure_outcomes
         WHERE scope=? AND procedure_id=? AND procedure_version=? AND status='failed'`).get(scope, id, version).n : 0
       result.fallbackVersion = null
-      if (last?.procedureVersion === version && last.status === 'failed' && !last.outwardDone) {
-        result.fallbackVersion = this.db.prepare(`SELECT max(h.version) AS version FROM long_history h
+      if (last?.procedureVersion === version && last.status === 'failed' && last.outwardDone === false) {
+        result.fallbackVersion = this.db.prepare(`SELECT h.version FROM long_history h
           JOIN procedure_outcomes o ON o.scope=h.scope AND o.procedure_id=h.id AND o.procedure_version=h.version
-          WHERE h.scope=? AND h.id=? AND h.version<? AND o.status='ok'`).get(scope, id, version).version
+          WHERE h.scope=? AND h.id=? AND h.version<? AND json_extract(h.record,'$.deleted')=0
+          GROUP BY h.version HAVING sum(o.status='ok') > sum(o.status='failed')
+            AND (SELECT latest.status FROM procedure_outcomes latest WHERE latest.scope=h.scope
+              AND latest.procedure_id=h.id AND latest.procedure_version=h.version
+              ORDER BY latest.id DESC LIMIT 1) <> 'failed'
+          ORDER BY h.version DESC LIMIT 1`).get(scope, id, version)?.version ?? null
       }
     }
     return result
   }
 
-  reportOutcome(writer, {handle, status, failedStep, outwardDone = false, detail}, identity) {
+  reportOutcome(writer, {handle, status, failedStep, outwardDone = null, detail}, identity) {
     const record = this.#resolve(handle, identity, (scope, id) => readLong(writer, scope, id))
     if (record?.kind !== 'procedure') return { status: 'INVALID_HANDLE' }
     if (failedStep !== undefined) {
       if (status === 'ok' || failedStep > record.data.steps.length) return { status: 'INVALID_INPUT' }
-      outwardDone ||= record.data.outwardSteps?.some(step => failedStep >= step) ?? false
+      if (record.data.outwardSteps?.length)
+        outwardDone = outwardDone === true || record.data.outwardSteps.some(step => step <= failedStep)
     }
     recordProcedureOutcome(writer, {scope: record.scope, procedureId: record.id, procedureVersion: record.version,
       status, failedStep, outwardDone, detail, authorRole: identity.authorRole, sessionId: identity.sessionId})

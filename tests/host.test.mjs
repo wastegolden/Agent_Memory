@@ -5,7 +5,9 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
 import { runScript, sandbox, stdioClient } from './helpers/host-process.mjs'
-import { enqueue, pendingScopes } from '../src/organizer/queue.mjs'
+import { enqueue, pendingScopes, pullBatch } from '../src/organizer/queue.mjs'
+import { CommitService } from '../src/storage/commit.mjs'
+import { openDatabase } from '../src/storage/database.mjs'
 
 const mainTools = ['short_term_list', 'short_term_read', 'search', 'read']
 
@@ -135,6 +137,49 @@ function injected(response) {
   return step.systemMessage.systemMessage
 }
 
+test('PreInvocation summarizes long commits once, folds large or unsafe IDs, and preserves the initial directory', async t => {
+  const {dir,env} = sandbox(t)
+  const scope = 'hooks'
+  const config = {...env, MEMORY_SCOPE:scope}
+  const db = openDatabase(join(dir,'memory.sqlite'))
+  const service = new CommitService(db)
+  const base = {conversationId:'observer'}
+  const pre = () => hook(config, base, 'pre')
+  const proc = {type:'long.put', id:'deploy', kind:'procedure', expectedVersion:0, title:'Deploy',
+    data:{conditions:[], parameters:[], steps:['private command']}}
+  const fact = id => ({type:'long.put', id, kind:'fact', expectedVersion:0, title:'Service setting',
+    data:{subject:'service', key:id, value:'private setting'}})
+  function commit(...operations) {
+    enqueue(db, {scope, authorRole:'owner', sourceId:randomUUID(), sourceSessionId:'seed', text:'private evidence'})
+    const {batchId} = pullBatch(db, {scope, consumerId:'organizer'})
+    const request = {scope,batchId,proposalId:randomUUID(),operations}
+    const result = service.commit(request,'organizer')
+    assert.equal(result.status,'COMMITTED')
+    assert.deepEqual(service.commit(request,'organizer'),result)
+  }
+  try {
+    commit(proc)
+    assert.equal(injected(await pre()), 'Short-term memory (list_rev=0, organizer=subagent)\nid | title | status | updatedAt')
+    assert.deepEqual(await pre(), {})
+    commit(fact('db_port'), {...proc,expectedVersion:1})
+    commit({...fact('db_port'),expectedVersion:1})
+    commit({type:'long.remove',id:'db_port',expectedVersion:2})
+    const arrivals = await Promise.all([pre(),pre()])
+    assert.equal(arrivals.filter(result => result.injectSteps).length, 1)
+    assert.equal(injected(arrivals.find(result => result.injectSteps)),
+      'Long memory rev=4: +fact:db_port / ~proc:deploy(v1->v2) / ~fact:db_port(v1->v2) / -fact:db_port')
+    assert.match(JSON.stringify(db.prepare('SELECT * FROM long_events').all()), /db_port/)
+    assert.doesNotMatch(JSON.stringify(db.prepare('SELECT * FROM long_events').all()), /private|Service setting/)
+    assert.deepEqual(await pre(), {})
+    commit(...Array.from({length:20}, (_, i) => fact('setting-' + i)))
+    assert.equal(injected(await pre()), 'Long memory rev=5: +20 / ~0 / -0')
+    commit(fact('unsafe\nprivate string'))
+    assert.equal(injected(await pre()), 'Long memory rev=6: +1 / ~0 / -0')
+    assert.doesNotMatch(JSON.stringify(db.prepare('SELECT * FROM long_events').all()), /private/)
+    assert.deepEqual(await pre(), {})
+  } finally { db.close() }
+})
+
 test('the public MCP rejects organizer calls while the daemon owns the queue', async t => {
   const { dir, env } = sandbox(t)
   const settings = { ...env, MEMORY_SCOPE: 'shared', MEMORY_MODE: 'daemon' }
@@ -262,6 +307,8 @@ test('Antigravity hooks, organizer and two main sessions share a scoped memory d
   assert.equal(concurrent.filter(output => output.injectSteps).length, 1)
   const digest = injected(concurrent.find(output => output.injectSteps))
   assert.equal(digest.split(/\r?\n/).length, 1)
+  assert.match(digest, /Memory list_rev=1 \+ "check" "发布检查" \| Long memory rev=1: \+fact:port/)
+  assert.ok(!digest.includes('43210'))
   assert.ok(digest.includes('+'))
   assert.ok(!digest.includes(evidence))
   assert.deepEqual(await hook(settings, { ...base, invocationNum: 3 }), {})

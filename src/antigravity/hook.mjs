@@ -19,19 +19,40 @@ function handleHook(db, config, input, event) {
     current = session(db, id)
   }
   if (current.role === 'organizer' || (event === 'start' && current.seen_rev >= 0)) return {}
-  const revision = db.prepare('SELECT rev FROM list_revisions WHERE scope=?').get(current.scope)?.rev ?? 0
-  if (revision === current.seen_rev) return {}
-  const { items, list_rev } = listShort(db, current.scope)
-  // Only one competing invocation may publish a particular change to the conversation.
-  const won = db.prepare('UPDATE session_roles SET seen_rev=?,snapshot=? WHERE conversationId=? AND seen_rev=?')
-    .run(list_rev, JSON.stringify(items), id, current.seen_rev).changes
-  if (!won) return {}
-  if (current.seen_rev < 0) {
-    const rows = items.map(row => [row.id, row.title, row.status, row.updatedAt].map(x => JSON.stringify(x)).join(' | '))
-    return inject(['Short-term memory (list_rev=' + list_rev + ', organizer=' + config.mode + ')',
-      'id | title | status | updatedAt', ...rows].join('\n'))
+  // Both revision counters, the directory and its change log share one read snapshot.
+  db.exec('BEGIN')
+  const {list_rev, long_rev} = db.prepare(`SELECT
+    coalesce((SELECT rev FROM list_revisions WHERE scope=?),0) AS list_rev,
+    coalesce((SELECT rev FROM long_revisions WHERE scope=?),0) AS long_rev`).get(current.scope, current.scope)
+  if (list_rev === current.seen_rev && long_rev === current.seen_long_rev) {
+    db.exec('COMMIT')
+    return {}
   }
-  const previous = new Map(JSON.parse(current.snapshot).map(item => [item.id, item]))
+  const initial = current.seen_rev < 0
+  const items = list_rev !== current.seen_rev ? listShort(db, current.scope).items : null
+  const messages = []
+  if (initial) {
+    const rows = items.map(row => [row.id, row.title, row.status, row.updatedAt].map(x => JSON.stringify(x)).join(' | '))
+    messages.push(['Short-term memory (list_rev=' + list_rev + ', organizer=' + config.mode + ')',
+      'id | title | status | updatedAt', ...rows].join('\n'))
+  } else {
+    if (items) {
+      const summary = shortDiff(items, current.snapshot, list_rev)
+      if (summary) messages.push(summary)
+    }
+    if (long_rev > current.seen_long_rev) {
+      messages.push(longDiff(db, current.scope, current.seen_long_rev, long_rev))
+    }
+  }
+  const won = db.prepare(`UPDATE session_roles SET seen_rev=?,snapshot=?,seen_long_rev=?
+    WHERE conversationId=? AND seen_rev=? AND seen_long_rev=?`)
+    .run(list_rev, items ? JSON.stringify(items) : current.snapshot, long_rev, id, current.seen_rev, current.seen_long_rev).changes
+  db.exec('COMMIT')
+  return won && messages.length ? inject(messages.join(' | ')) : {}
+}
+
+function shortDiff(items, snapshot, list_rev) {
+  const previous = new Map(JSON.parse(snapshot).map(item => [item.id, item]))
   const diff = []
   for (const item of items) {
     const old = previous.get(item.id)
@@ -41,13 +62,34 @@ function handleHook(db, config, input, event) {
     previous.delete(item.id)
   }
   for (const key of previous.keys()) diff.push('- ' + JSON.stringify(key))
-  if (!diff.length) return {}
+  if (!diff.length) return ''
   let summary = diff.join(' / ')
   if (summary.length > 220) {
     summary = ['+', '~', '-'].map(mark => mark + diff.filter(entry => entry.startsWith(mark)).length).join(' / ')
       + ' (short_term_list)'
   }
-  return inject('Memory list_rev=' + list_rev + ' ' + summary)
+  return 'Memory list_rev=' + list_rev + ' ' + summary
+}
+
+function longDiff(db, scope, since, revision) {
+  const prefix = 'Long memory rev=' + revision + ': '
+  const counts = {'+': 0, '~': 0, '-': 0}
+  let summary = ''
+  const events = db.prepare(`SELECT kind,id,action,from_version,to_version FROM long_events
+    WHERE scope=? AND rev>? AND rev<=? ORDER BY rev,seq`).iterate(scope, since, revision)
+  for (const {kind,id,action,from_version,to_version} of events) {
+    counts[action]++
+    if (summary === null) continue
+    if (id.startsWith('#')) {
+      summary = null
+      continue
+    }
+    const label = kind === 'procedure' ? 'proc' : 'fact'
+    summary += (summary ? ' / ' : '') + action + label + ':' + id
+    if (action === '~') summary += '(v' + from_version + '->v' + to_version + ')'
+    if (prefix.length + summary.length > 220) summary = null
+  }
+  return prefix + (summary ?? Object.entries(counts).map(([action,n]) => action + n).join(' / '))
 }
 
 function stop(dbOrFile, config, input, binding) {

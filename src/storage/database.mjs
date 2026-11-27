@@ -12,11 +12,26 @@ const outcomeSchema = `
   CREATE TABLE procedure_outcomes (
     id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, procedure_id TEXT NOT NULL,
     procedure_version INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('ok','failed','fallback')),
-    failed_step INTEGER, outward_done INTEGER NOT NULL DEFAULT 0, detail TEXT NOT NULL DEFAULT '',
+    failed_step INTEGER, outward_done INTEGER CHECK(outward_done IN (0, 1)), detail TEXT NOT NULL DEFAULT '',
     author_role TEXT NOT NULL CHECK(author_role IN ('owner','worker','external')),
     session_id TEXT NOT NULL, recorded_at TEXT NOT NULL
   );
   CREATE INDEX procedure_outcomes_recent ON procedure_outcomes(scope, procedure_id, id DESC);
+  CREATE INDEX procedure_outcomes_version ON procedure_outcomes(scope, procedure_id, procedure_version, id DESC);
+`
+
+const longRevisionSchema = `
+  ALTER TABLE session_roles ADD COLUMN seen_long_rev INTEGER NOT NULL DEFAULT -1;
+  UPDATE session_roles SET seen_long_rev=0 WHERE seen_rev>=0;
+  CREATE TABLE long_revisions (scope TEXT PRIMARY KEY, rev INTEGER NOT NULL);
+  CREATE TABLE long_events (
+    scope TEXT NOT NULL, rev INTEGER NOT NULL, seq INTEGER NOT NULL, kind TEXT NOT NULL,
+    id TEXT NOT NULL, action TEXT NOT NULL, from_version INTEGER NOT NULL, to_version INTEGER NOT NULL,
+    PRIMARY KEY(scope, rev, seq)
+  );
+  CREATE INDEX procedures_by_scope ON long_records(scope,id) WHERE kind='procedure';
+  CREATE INDEX procedure_history_by_scope ON long_history(scope,id,version)
+    WHERE json_extract(record,'$.kind')='procedure';
 `
 
 const schema = `
@@ -103,9 +118,9 @@ export function openDatabase(file, { readOnly = false, busyTimeout = 3000 } = {}
     db.exec(`PRAGMA busy_timeout = ${busyTimeout}`)
     const schemaVersion = db.prepare('PRAGMA user_version')
     const version = schemaVersion.get().user_version
-    if (version === 3) return db
-    if ((version === 1 || version === 2) && readOnly) throw new Error('Open the memory database for writing once to upgrade it')
-    if (![0,1,2].includes(version) || readOnly) throw new Error('Unsupported or uninitialized memory database')
+    if (version === 4) return db
+    if ([1,2,3].includes(version) && readOnly) throw new Error('Open the memory database for writing once to upgrade it')
+    if (![0,1,2,3].includes(version) || readOnly) throw new Error('Unsupported or uninitialized memory database')
     db.exec('PRAGMA journal_mode = WAL; BEGIN IMMEDIATE')
     switch (schemaVersion.get().user_version) {
       case 0:
@@ -119,15 +134,27 @@ export function openDatabase(file, { readOnly = false, busyTimeout = 3000 } = {}
         db.exec(factIndex)
         break
       case 2:
-        break
       case 3:
+        break
+      case 4:
         db.exec('COMMIT')
         return db
       default:
         throw new Error('Unsupported memory database version')
     }
-    db.exec(outcomeSchema)
-    db.exec('PRAGMA user_version = 3; COMMIT')
+    if (db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='procedure_outcomes'").get()) {
+      db.exec(`ALTER TABLE procedure_outcomes RENAME TO old_outcomes;
+        DROP INDEX IF EXISTS procedure_outcomes_recent;`)
+      db.exec(outcomeSchema)
+      db.exec(`INSERT INTO procedure_outcomes SELECT * FROM old_outcomes;
+        UPDATE sqlite_sequence SET seq=max(seq,coalesce((SELECT seq FROM sqlite_sequence WHERE name='old_outcomes'),0))
+          WHERE name='procedure_outcomes';
+        DROP TABLE old_outcomes;`)
+    } else {
+      db.exec(outcomeSchema)
+    }
+    db.exec(longRevisionSchema)
+    db.exec('PRAGMA user_version = 4; COMMIT')
     return db
   } catch (error) {
     db.close()
@@ -171,16 +198,16 @@ export function historyLong(db, scope, id) {
 
 // The caller holds BEGIN IMMEDIATE from handle resolution through this insert.
 export function recordProcedureOutcome(db, {scope, procedureId, procedureVersion, status, failedStep = null,
-  outwardDone = false, detail = '', authorRole, sessionId}) {
+  outwardDone, detail = '', authorRole, sessionId}) {
   db.prepare(`INSERT INTO procedure_outcomes
     (scope,procedure_id,procedure_version,status,failed_step,outward_done,detail,author_role,session_id,recorded_at)
     VALUES (?,?,?,?,?,?,?,?,?,?)`).run(scope, procedureId, procedureVersion, status, failedStep,
-      Number(outwardDone), detail, authorRole, sessionId, new Date().toISOString())
+      outwardDone == null ? null : Number(outwardDone), detail, authorRole, sessionId, new Date().toISOString())
 }
 
 export function listProcedureOutcomes(db, scope, id, limit = 3) {
   return db.prepare(`SELECT procedure_version AS procedureVersion, status, failed_step AS failedStep,
     outward_done AS outwardDone, detail, author_role AS authorRole, recorded_at AS recordedAt
     FROM procedure_outcomes WHERE scope=? AND procedure_id=? ORDER BY id DESC LIMIT ?`)
-    .all(scope, id, limit).map(row => ({...row, outwardDone: Boolean(row.outwardDone)}))
+    .all(scope, id, limit).map(row => ({...row, outwardDone: row.outwardDone === null ? null : Boolean(row.outwardDone)}))
 }

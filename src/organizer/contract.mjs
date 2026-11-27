@@ -11,6 +11,7 @@ export const organizerInstructions = [
   'long.put uses {kind,title,data,context?,validFrom?,validUntil?,tags?}. A fact has data:{subject,key,value}. Set context only when the evidence explicitly identifies the environment or situation. The configured context is a hint. Use evidence for validity dates.',
   'A procedure has data:{conditions,steps,parameters} (string arrays) and optional outwardSteps (1-based indices of steps with external effects). List parameter names and store scenario-specific values as separate facts.',
   'When revising a procedure, use its full conditions, steps, parameters and tags, preserve unchanged steps and their outward markers, and use recentOutcomes (failedStep, outwardDone) to locate needed repairs.',
+  'Consult recentOutcomes detail and failedRevisions to avoid repeating failed steps.',
   'Use long.put on the existing ID/version to correct a fact. long.remove retires it.',
   'short.promote takes the short ID/version plus record:{id,expectedVersion,kind,title,data,...} for the long record.',
   'Only cite events that support the operation. Preserve unfinished commitments and respect record authority: owner > worker > external.',
@@ -35,7 +36,22 @@ export function pullForOrganizer(db, request) {
     GROUP BY r.scope,r.id HAVING count(token.value)>0 OR instr(?,r.id)>0
     ORDER BY count(token.value) DESC,r.updated_at DESC,r.id LIMIT 32`)
     .all(JSON.stringify(tokenize(mentions)), batch.scope, mentions)
-    .map(({data, tags, ...row}) => ({...row, tags: JSON.parse(tags), ...JSON.parse(data),
-      ...(row.kind === 'procedure' && {recentOutcomes: listProcedureOutcomes(db, batch.scope, row.id)})}))
+    .map(({data, tags, ...row}) => {
+      const record = {...row, tags: JSON.parse(tags), ...JSON.parse(data)}
+      if (row.kind === 'procedure') {
+        record.recentOutcomes = listProcedureOutcomes(db, batch.scope, row.id)
+        const failures = db.prepare(`SELECT h.version, json_extract(h.record,'$.data.steps') AS steps,
+          json_extract(h.record,'$.data.outwardSteps') AS outwardSteps, o.status, o.failed_step AS failedStep,
+          o.outward_done AS outwardDone, o.detail FROM long_history h JOIN procedure_outcomes o ON o.id=(
+            SELECT id FROM procedure_outcomes WHERE scope=h.scope AND procedure_id=h.id
+              AND procedure_version=h.version AND status IN ('failed','fallback') ORDER BY id DESC LIMIT 1)
+          WHERE h.scope=? AND h.id=? AND h.version<? AND json_extract(h.record,'$.deleted')=0
+          ORDER BY o.id DESC LIMIT 2`).all(batch.scope, row.id, row.version)
+        if (failures.length) record.failedRevisions = failures.map(({version,steps,outwardSteps,status,failedStep,outwardDone,detail}) =>
+          ({version, steps: JSON.parse(steps), outwardSteps: JSON.parse(outwardSteps ?? '[]'),
+            lastFailure: {status, failedStep, outwardDone: outwardDone === null ? null : Boolean(outwardDone), detail}}))
+      }
+      return record
+    })
   return {...batch, context: request.context ?? null, current: {short, long}, instructions: organizerInstructions}
 }

@@ -85,6 +85,19 @@ export class CommitService {
         this.db.prepare(`INSERT INTO list_revisions (scope,rev) VALUES (?,1)
           ON CONFLICT(scope) DO UPDATE SET rev=rev+1`).run(scope)
       }
+      const longChanges = changes.filter(change => change.kind === 'fact' || change.kind === 'procedure')
+      if (longChanges.length) {
+        const {rev} = this.db.prepare(`INSERT INTO long_revisions (scope,rev) VALUES (?,1)
+          ON CONFLICT(scope) DO UPDATE SET rev=rev+1 RETURNING rev`).get(scope)
+        const add = this.db.prepare(`INSERT INTO long_events
+          (scope,rev,seq,kind,id,action,from_version,to_version) VALUES (?,?,?,?,?,?,?,?)`)
+        for (const [seq, {kind,id,version,deleted}] of longChanges.entries()) {
+          const action = version === 1 ? '+' : deleted ? '-' : '~'
+          // Legacy IDs can contain free text. Keep only an opaque reference for those.
+          const publicId = /^[\p{L}\p{N}_.-]{1,60}$/u.test(id) ? id : '#' + createHash('sha256').update(id).digest('hex')
+          add.run(scope,rev,seq,kind,publicId,action,version-1,version)
+        }
+      }
       const result = {status:'COMMITTED', changes}
       this.db.prepare('INSERT INTO receipts VALUES (?,?,?,?,?)')
         .run(scope,proposalId,consumerId,fingerprint,JSON.stringify(result))
@@ -169,6 +182,10 @@ export class CommitService {
     if (deleted && (!current || current.deleted)) refuse('VERSION_CONFLICT')
     const content = deleted ? current : op
     if (current && current.kind !== content.kind) refuse('VERSION_CONFLICT')
+    if (!deleted && current?.kind === 'procedure' && current.data.outwardSteps?.length && rank[role] < rank.owner) {
+      if (!Array.isArray(content.data.outwardSteps) || content.data.outwardSteps.length < current.data.outwardSteps.length)
+        refuse('FORBIDDEN')
+    }
     const subject = content.kind === 'fact' ? factKey(content.data.subject) : null
     const key = content.kind === 'fact' ? factKey(content.data.key) : null
     if (!deleted && content.kind === 'fact') {

@@ -122,6 +122,24 @@ test('a SQLite automatic rollback preserves the original error', t => {
   assert.equal(readShort(db,scope,'entry'),null)
 })
 
+test('only the owner may shrink or remove outward step markers', t => {
+  const {db,submit} = setup(t)
+  function edit(role, expectedVersion, outwardSteps, expectedStatus) {
+    const data = {...procedure.data, steps:['inspect','publish','notify']}
+    if (outwardSteps !== undefined) data.outwardSteps = outwardSteps
+    assert.equal(submit(role,{...procedure, expectedVersion, data}).status,expectedStatus)
+  }
+  edit('worker', 0, [1,2], 'COMMITTED')
+  edit('worker', 1, undefined, 'FORBIDDEN')
+  edit('worker', 1, [2], 'FORBIDDEN')
+  edit('worker', 1, [], 'FORBIDDEN')
+  edit('worker', 1, [2,3], 'COMMITTED')
+  edit('worker', 2, [1,2,3], 'COMMITTED')
+  edit('owner', 3, [2], 'COMMITTED')
+  edit('owner', 4, undefined, 'COMMITTED')
+  assert.equal(db.prepare('SELECT rev FROM long_revisions WHERE scope=?').get(scope).rev, 5)
+})
+
 test('v1 migration keeps the strongest current fact, appends linked history, and rebuilds search terms', t => {
   const dir = mkdtempSync(join(tmpdir(),'agent-memory-v1-'))
   t.after(() => rmSync(dir,{recursive:true, force:true}))
@@ -133,6 +151,7 @@ test('v1 migration keeps the strongest current fact, appends linked history, and
       (scope,context,json_extract(data,'$.subject'),json_extract(data,'$.key')) WHERE kind='fact' AND deleted=0;
     CREATE TABLE long_history(scope,id,version INTEGER,record,PRIMARY KEY(scope,id,version));
     CREATE TABLE memory_queue(id INTEGER PRIMARY KEY);
+    CREATE TABLE session_roles(conversationId TEXT PRIMARY KEY,role TEXT,scope TEXT,seen_rev INTEGER,snapshot TEXT);
     INSERT INTO memory_queue VALUES(1);
     PRAGMA user_version=1`)
   installIndex(old)
@@ -152,7 +171,7 @@ test('v1 migration keeps the strongest current fact, appends linked history, and
   assert.throws(() => openDatabase(file,{readOnly:true}),/upgrade/u)
   const db = openDatabase(file)
   try {
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version,3)
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,4)
     assert.equal(db.prepare('SELECT count(*) AS n FROM procedure_outcomes').get().n,0)
     for (const id of ['worker','owner-old']) {
       const historical = historyLong(db,scope,id)
